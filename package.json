@@ -8,7 +8,7 @@
   "author": "meta_codes",
   "keywords": [
     "shared-memory", "ring-buffer", "ipc", "seqlock", "electron",
-    "python", "zero-copy", "frame", "lock-free"
+    "python", "low-latency", "frame", "lock-free"
   ],
   "engines": { "node": ">=18" },
   "os": ["win32", "linux", "darwin"],

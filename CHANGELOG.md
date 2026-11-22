@@ -5,6 +5,15 @@ The wire format is versioned independently in [PROTOCOL.md](PROTOCOL.md).
 
 ## Unreleased
 
+- Clarified positioning in `README.md` with a new "适用场景与不适用" section:
+  decision criteria, direct-use scenarios, adaptation requirements for continuous
+  streams (blocking, sequence numbers, CRC32, independent persistence), and
+  explicit non-use cases (lossless recording, reliable delivery, multi-writer,
+  cross-machine, ARM, unattended long-running).
+- Replaced the misleading `zero-copy` keyword with `low-latency` in both
+  `package.json` and `pyproject.toml`. The reader always copies payload/meta
+  into an independent buffer (see PROTOCOL.md section 7); the remaining mentions
+  of zero-copy views in docs are explicit warnings against that pattern.
 - Added a second showcase at [`examples/electron-multi-camera/`](examples/electron-multi-camera/):
   one Python process publishing 5 independent named segments with pre-generated
   synthetic PNG frames, one Electron 2ms loop scanning 5 readers, a single batched

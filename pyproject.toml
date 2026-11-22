@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
 authors = [{ name = "meta_codes" }]
-keywords = ["shared-memory", "ring-buffer", "ipc", "seqlock", "electron", "zero-copy"]
+keywords = ["shared-memory", "ring-buffer", "ipc", "seqlock", "electron", "low-latency"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
