@@ -25,8 +25,8 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://gitee.com/meta_codes/shmring.git"
+    "url": "https://github.com/Huochengyan/shmring.git"
   },
-  "bugs": { "url": "https://gitee.com/meta_codes/shmring/issues" },
-  "homepage": "https://gitee.com/meta_codes/shmring"
+  "bugs": { "url": "https://github.com/Huochengyan/shmring/issues" },
+  "homepage": "https://github.com/Huochengyan/shmring"
 }
