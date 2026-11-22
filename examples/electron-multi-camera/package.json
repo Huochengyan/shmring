@@ -1,0 +1,17 @@
+{
+  "name": "shmring-electron-multi-camera-example",
+  "version": "1.0.0",
+  "private": true,
+  "description": "shmring showcase: 5 concurrent synthetic cameras -> 5 named shm segments -> Electron grid view",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "bench": "python ../../scripts/bench_multi.py"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  },
+  "dependencies": {
+    "shmring": "file:../.."
+  }
+}

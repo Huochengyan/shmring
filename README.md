@@ -82,7 +82,7 @@ with ShmRingReader("demo2") as r:
     print(r.read().payload)            # b'hello'
 ```
 
-[`examples/`](examples/) 下有 4 个最小读写脚本，以及一个完整的 Electron 摄像头 showcase（见下节）；跨语言对拍脚本见 `node scripts/interop.js`。
+[`examples/`](examples/) 下有 4 个最小读写脚本，以及两个完整的 Electron showcase（单路摄像头、5 路并发合成帧）；跨语言对拍脚本见 `node scripts/interop.js`，多段并发基准见 `python scripts/bench_multi.py`。
 
 ## Showcase：Electron 摄像头实时画面
 
@@ -98,6 +98,12 @@ ffmpeg MJPEG → ShmRingWriter.publish(jpeg, meta)
 ```
 
 运行方式见 [该目录 README](examples/electron-camera/README.md)。本机（Windows，640×360 MJPEG）实测 **30 fps、帧龄 avg 1ms、累计跳帧 0**；CDP 验证渲染端画面与 `meta` 往返正确。
+
+### 5 路并发：一路一段
+
+[`examples/electron-multi-camera/`](examples/electron-multi-camera/) 是第二档 showcase：一个 Python 进程开 5 个 `ShmRingWriter` 各写各的命名段，Electron 用**一个** 2ms 循环遍历 5 个 reader、一次批量 IPC、5 宫格渲染，全部用合成帧，不依赖摄像头。
+
+它演示的是「同一进程内多个 writer 实例互不干扰」——帧号、`seq`、槽几何、线程锁全部实例隔离，一路卡住不影响其余四路。配套 [`scripts/bench_multi.py`](scripts/bench_multi.py) 的实测：限速 30fps/路时 5 路合计 **147.2 fps、丢帧 0、帧龄 avg 1.41ms**；不限速纯 publish 达到 133638 fps（5473.8 MB/s），5 路 / 1 路 = 0.76×，说明 CPython 下 GIL 使同进程多线程没有并行加速，但也证明传输层远不是瓶颈。详见 [该目录 README](examples/electron-multi-camera/README.md)。
 
 ## API
 
@@ -154,6 +160,8 @@ ffmpeg MJPEG → ShmRingWriter.publish(jpeg, meta)
 python -m unittest discover -s tests -v   # Python 单测
 npm test                                   # Node 单测（node --test）
 node scripts/interop.js                    # 跨语言双向对拍
+python scripts/bench_multi.py              # 1 路 vs 5 路并发基准
+python scripts/verify_multi.py             # 5 段跨语言端到端验证
 ```
 
 CI 在 `ubuntu-latest` / `macos-latest` / `windows-latest` 三个平台跑完整矩阵，见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)。

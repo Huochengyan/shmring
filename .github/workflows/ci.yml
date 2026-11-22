@@ -35,3 +35,9 @@ jobs:
 
       - name: Cross-language interop (both directions)
         run: node scripts/interop.js
+
+      - name: Multi-segment concurrent benchmark (smoke)
+        run: python scripts/bench_multi.py --quick --no-unlimited
+
+      - name: Multi-segment cross-language verify (5 segments)
+        run: python scripts/verify_multi.py

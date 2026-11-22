@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>shmring · 5 路并发共享内存 showcase</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div>
+        <h1>5 路并发 · 一路一段</h1>
+        <p class="subtitle">Python 单进程开 5 个 ShmRingWriter 写 5 个命名段，Electron 一个循环扫 5 个 reader</p>
+      </div>
+      <div class="badge">shmring v1 · 合成帧</div>
+    </header>
+
+    <main class="layout">
+      <section class="stage">
+        <div class="stage-head">
+          <span id="liveDot" class="dot"></span>
+          <span id="statusText">正在连接…</span>
+          <span id="framesLabel" class="frame-label">已收 0 帧</span>
+        </div>
+        <div id="grid" class="grid"></div>
+        <div class="stage-foot">
+          <span>每路独立的 4 槽环形缓冲 + seqlock；一路卡住不影响其余四路</span>
+          <span id="scanLabel">扫描间隔 2ms</span>
+        </div>
+      </section>
+
+      <aside class="side">
+        <div class="panel">
+          <h2>总览</h2>
+          <div class="metric"><span>合计帧率</span><strong id="totalFps">-</strong></div>
+          <div class="metric"><span>平均帧龄</span><strong id="avgAge">-</strong></div>
+          <div class="metric"><span>累计跳帧</span><strong id="totalDropped">-</strong></div>
+          <div class="metric"><span>并发段数</span><strong id="camCount">-</strong></div>
+          <div class="metric"><span>协议 / 传输</span><strong id="transport">-</strong></div>
+          <div class="metric"><span>运行时长</span><strong id="uptime">-</strong></div>
+        </div>
+
+        <div class="panel">
+          <h2>逐路状态</h2>
+          <table class="cam-table">
+            <thead>
+              <tr><th>路</th><th>fps</th><th>帧号</th><th>跳帧</th><th>状态</th></tr>
+            </thead>
+            <tbody id="camRows"></tbody>
+          </table>
+          <p class="hint" id="serverInfo">服务端信息：-</p>
+        </div>
+
+        <div class="panel">
+          <h2>控制</h2>
+          <button id="toggleBtn" class="primary" type="button">暂停画面</button>
+          <button id="refreshBtn" type="button">刷新统计</button>
+          <p class="hint">「暂停」只停绘制，Python 仍在 5 路并发发布；逐路 fps / 帧龄 / 跳帧继续统计。</p>
+        </div>
+
+        <div class="note">
+          帧数据不落磁盘：库只处理不透明字节，<strong>cam_id / w / h / mime</strong> 由每帧 meta 携带。
+          本示例展示的核心是「同一进程内多个 writer 实例各写各的段」，段名互不相同，
+          帧号、seq、槽几何、线程锁全部实例隔离。
+        </div>
+      </aside>
+    </main>
+  </div>
+  <script src="renderer.js"></script>
+</body>
+</html>

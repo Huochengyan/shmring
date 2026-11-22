@@ -5,6 +5,22 @@ The wire format is versioned independently in [PROTOCOL.md](PROTOCOL.md).
 
 ## Unreleased
 
+- Added a second showcase at [`examples/electron-multi-camera/`](examples/electron-multi-camera/):
+  one Python process publishing 5 independent named segments with pre-generated
+  synthetic PNG frames, one Electron 2ms loop scanning 5 readers, a single batched
+  IPC send and a 5-up Canvas grid with per-camera fps / frame age / dropped / online
+  stats. It demonstrates that the library has no process-level mutable state and
+  that N writer instances can publish concurrently as long as each owns its own
+  segment.
+- Added [`scripts/bench_multi.py`](scripts/bench_multi.py): 1-vs-N concurrent
+  publish benchmark with latency percentiles, reader frame age / dropped counts
+  and a GIL scaling ratio. Measured on Windows: 5 cameras at 30 fps each =
+  147.2 fps total, 0 dropped, 1.41 ms avg frame age; unlimited publish reaches
+  5.47 GB/s (0.76x the single-writer rate, i.e. no GIL-parallel speedup).
+- Added [`scripts/verify_multi.py`](scripts/verify_multi.py): cross-language
+  end-to-end check that starts the 5-segment Python writer and reads all five
+  segments from Node, asserting PNG payload, meta `cam_id` / mime / size.
+- Added quick benchmark + 5-segment cross-language verify steps to the CI matrix.
 - Added a full Electron camera showcase at [`examples/electron-camera/`](examples/electron-camera/):
   Python `ShmRingWriter` + Electron `ShmRingReader.readBatch()` + Canvas, with
   `width/height/mime` carried in per-frame `meta`. The demo no longer implements

@@ -26,6 +26,17 @@
     "examples/electron-camera/renderer/index.html",
     "examples/electron-camera/renderer/renderer.js",
     "examples/electron-camera/renderer/style.css",
+    "examples/electron-multi-camera/README.md",
+    "examples/electron-multi-camera/package.json",
+    "examples/electron-multi-camera/main.js",
+    "examples/electron-multi-camera/preload.js",
+    "examples/electron-multi-camera/python/server.py",
+    "examples/electron-multi-camera/python/frames.py",
+    "examples/electron-multi-camera/renderer/index.html",
+    "examples/electron-multi-camera/renderer/renderer.js",
+    "examples/electron-multi-camera/renderer/style.css",
+    "scripts/bench_multi.py",
+    "scripts/verify_multi.py",
     "PROTOCOL.md", "README.md", "LICENSE", "CHANGELOG.md"
   ],
   "scripts": {
