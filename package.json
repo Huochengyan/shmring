@@ -13,7 +13,20 @@
   "engines": { "node": ">=18" },
   "os": ["win32", "linux", "darwin"],
   "files": [
-    "index.js", "lib/", "PROTOCOL.md", "README.md", "LICENSE", "CHANGELOG.md"
+    "index.js", "lib/",
+    "examples/node_reader.js", "examples/node_writer.js",
+    "examples/python_reader.py", "examples/python_writer.py",
+    "examples/electron-camera/README.md",
+    "examples/electron-camera/package.json",
+    "examples/electron-camera/main.js",
+    "examples/electron-camera/preload.js",
+    "examples/electron-camera/node-shm-reader.js",
+    "examples/electron-camera/python/server.py",
+    "examples/electron-camera/python/requirements.txt",
+    "examples/electron-camera/renderer/index.html",
+    "examples/electron-camera/renderer/renderer.js",
+    "examples/electron-camera/renderer/style.css",
+    "PROTOCOL.md", "README.md", "LICENSE", "CHANGELOG.md"
   ],
   "scripts": {
     "test": "node --test",

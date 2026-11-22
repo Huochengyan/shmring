@@ -1,0 +1,17 @@
+{
+  "name": "shmring-electron-camera-example",
+  "version": "1.0.0",
+  "private": true,
+  "description": "shmring showcase: Python camera -> shared-memory ring -> Electron live view",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "read-frame": "node node-shm-reader.js"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  },
+  "dependencies": {
+    "shmring": "file:../.."
+  }
+}

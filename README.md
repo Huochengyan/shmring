@@ -4,8 +4,8 @@
 
 Python 写、Node/Electron 读（或反过来），两端直接映射同一块 OS 命名共享内存。`shmring` 把这条链路里最值得复用的部分——**内存布局 + seqlock + 环形覆盖 + 平台适配**——抽成了一个独立库，业务数据只是不透明字节。
 
-> 状态：`v0.1.0` 开发完成，**尚未发布到 PyPI / npm**。当前请从源码使用：
-> `pip install -e .` 与 `npm install`（见下文）。协议见 [PROTOCOL.md](PROTOCOL.md)。
+> 状态：`v0.1.0` 已发布到 **PyPI**（`pip install shmring`）；npm 首个版本待发布，
+> 当前 Node 侧请从源码使用 `npm install`（见下文）。协议见 [PROTOCOL.md](PROTOCOL.md)。
 
 ## 为什么需要它
 
@@ -32,18 +32,12 @@ Python 写、Node/Electron 读（或反过来），两端直接映射同一块 O
 ## 安装
 
 ```bash
-# Python 端
-pip install -e .
-
-# Node 端
-npm install
-```
-
-发布后将是：
-
-```bash
+# Python 端（PyPI 已发布）
 pip install shmring
-npm install shmring
+
+# 从源码开发：仓库根
+pip install -e .
+npm install        # Node 端依赖 koffi；npm 包发布后可直接 npm install shmring
 ```
 
 依赖：Python ≥ 3.9（仅标准库）；Node ≥ 18 + `koffi ^3.3.8`。
@@ -88,7 +82,22 @@ with ShmRingReader("demo2") as r:
     print(r.read().payload)            # b'hello'
 ```
 
-可跑的完整示例在 [`examples/`](examples/)，跨语言对拍脚本见 `node scripts/interop.js`。
+[`examples/`](examples/) 下有 4 个最小读写脚本，以及一个完整的 Electron 摄像头 showcase（见下节）；跨语言对拍脚本见 `node scripts/interop.js`。
+
+## Showcase：Electron 摄像头实时画面
+
+[`examples/electron-camera/`](examples/electron-camera/) 是本库的**完整上层应用**：Python 用 ffmpeg 采集摄像头，`ShmRingWriter` 写帧；Electron 主进程 `ShmRingReader.readBatch()` 批量读帧，渲染进程用 Canvas 实时显示。无 HTTP、无端口、无轮询。
+
+它演示了库的核心取舍：**库只传不透明字节，业务语义由应用自己编码**。这里把 `width / height / mime` 放进每帧 `meta`（紧凑 JSON），库完全不关心载荷是 JPEG、PCM 还是张量。两端代码里没有任何 struct 布局、内存偏移或 FFI 调用——这些都被收进库里了。
+
+```text
+ffmpeg MJPEG → ShmRingWriter.publish(jpeg, meta)
+             → OS 命名共享内存（4 槽 + seqlock）
+             → ShmRingReader.readBatch()
+             → Electron IPC → ImageDecoder → Canvas
+```
+
+运行方式见 [该目录 README](examples/electron-camera/README.md)。本机（Windows，640×360 MJPEG）实测 **30 fps、帧龄 avg 1ms、累计跳帧 0**；CDP 验证渲染端画面与 `meta` 往返正确。
 
 ## API
 
@@ -151,7 +160,8 @@ CI 在 `ubuntu-latest` / `macos-latest` / `windows-latest` 三个平台跑完整
 
 ## 路线图
 
-- [ ] 发布 `shmring` 到 PyPI 与 npm
+- [x] 发布 `shmring` 0.1.0 到 PyPI（2026-11-22）
+- [ ] 发布到 npm（首版需人工认证，之后可配 Trusted Publisher 免 token）
 - [ ] Node 端补 `replace` / 重置已有段能力（目前仅 Python 端提供）
 - [ ] ARM / 弱内存序平台的屏障验证
 - [ ] 可选的 CRC32 校验（槽头已预留 `checksum` 字段）

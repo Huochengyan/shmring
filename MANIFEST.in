@@ -1,0 +1,4 @@
+include PROTOCOL.md CHANGELOG.md LICENSE README.md
+recursive-include examples *.md *.py *.js *.json *.html *.css *.txt
+prune examples/electron-camera/node_modules
+global-exclude __pycache__ *.py[cod] package-lock.json

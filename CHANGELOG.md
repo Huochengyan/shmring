@@ -3,7 +3,21 @@
 All notable changes to this project are documented here.
 The wire format is versioned independently in [PROTOCOL.md](PROTOCOL.md).
 
-## 0.1.0 (unreleased)
+## Unreleased
+
+- Added a full Electron camera showcase at [`examples/electron-camera/`](examples/electron-camera/):
+  Python `ShmRingWriter` + Electron `ShmRingReader.readBatch()` + Canvas, with
+  `width/height/mime` carried in per-frame `meta`. The demo no longer implements
+  any wire protocol of its own.
+- Fixed a handle leak in `ShmRingReader` (both Python and Node): if the segment
+  exists but the global header is not written yet, `magic` validation throws and
+  the already-open mapping is now closed before the caller retries attach.
+- `examples/` is now included in the npm tarball and sdist, so the
+  `example:read` / `example:write` scripts work after installing the package.
+- `pyproject.toml` uses the SPDX `license = "MIT"` string and drops the
+  deprecated license classifier (setuptools deprecation, due 2027-02-18).
+
+## 0.1.0 (2026-11-22)
 
 Initial extraction from the `electron-python-camera-demo` prototype.
 
@@ -26,4 +40,5 @@ Initial extraction from the `electron-python-camera-demo` prototype.
   hardware by the maintainers.
 - ARM / weak memory-order platforms unverified.
 - Node side has no `replace` / in-place reset yet.
-- Not yet published to PyPI / npm.
+- Published to PyPI; npm package not yet released (first publish needs a
+  one-time manual authentication).

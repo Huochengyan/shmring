@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>shmring · Python ⇄ Electron 摄像头示例</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div>
+        <h1>实时画面 · 内存交换示例</h1>
+        <p class="subtitle">Python 采集并写入共享内存，Electron 从进程内存取帧后直接绘制</p>
+      </div>
+      <div class="badge">Python ⇄ Electron</div>
+    </header>
+
+    <main class="layout">
+      <section class="stage">
+        <div class="stage-head">
+          <span id="liveDot" class="dot"></span>
+          <span id="statusText">正在连接…</span>
+          <span id="frameLabel" class="frame-label">frame #0</span>
+        </div>
+        <div class="canvas-wrap">
+          <canvas id="view" width="640" height="360"></canvas>
+          <div id="placeholder" class="placeholder">等待帧数据…</div>
+        </div>
+        <div class="stage-foot">
+          <span id="sourceLabel">来源：-</span>
+          <span id="sizeLabel">尺寸：-</span>
+        </div>
+      </section>
+
+      <aside class="side">
+        <div class="panel">
+          <h2>共享内存状态</h2>
+          <div class="metric">
+            <span>共享内存名称</span>
+            <strong id="shmName">-</strong>
+          </div>
+          <div class="metric">
+            <span>缓冲区大小</span>
+            <strong id="bufferSize">-</strong>
+          </div>
+          <div class="metric">
+            <span>采集帧率</span>
+            <strong id="fpsValue">-</strong>
+          </div>
+          <div class="metric">
+            <span>帧编号</span>
+            <strong id="frameId">-</strong>
+          </div>
+          <div class="metric">
+            <span>画面格式</span>
+            <strong id="mimeValue">-</strong>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>控制</h2>
+          <button id="toggleBtn" class="primary" type="button">暂停画面</button>
+          <button id="refreshBtn" type="button">刷新统计</button>
+          <label class="check">
+            <input type="checkbox" id="latencyToggle" />
+            延迟自检（毫秒秒表）
+          </label>
+          <p class="hint">
+            勾选后画面左上角显示毫秒级秒表。把摄像头对准屏幕，用手机拍下屏幕：
+            照片里"画面中的秒表"和"左上角秒表"的差值，就是从拍摄到上屏的端到端延迟。
+          </p>
+          <p class="hint" id="serverInfo">服务端地址：-</p>
+        </div>
+
+        <div class="note">
+          帧数据不落磁盘：Python 端用 <strong>shmring</strong> 写入命名共享内存段，
+          Electron 主进程用同一个库直接映射读取（4 槽环形缓冲 + seqlock，库内部封装
+          koffi/FFI 与跨平台差异），经 IPC 交给渲染进程用 Canvas 解码绘制，全程无 HTTP。
+          宽高与 MIME 作为每帧 meta 传递，库本身只处理不透明字节。
+        </div>
+      </aside>
+    </main>
+  </div>
+  <script src="renderer.js"></script>
+</body>
+</html>

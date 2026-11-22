@@ -1,0 +1,2 @@
+# 可选备选源：装了 ffmpeg 就不需要这个文件；OpenCV 仅在 ffmpeg 不可用时作为摄像头兜底
+opencv-python>=4.8.0

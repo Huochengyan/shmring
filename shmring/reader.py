@@ -33,7 +33,13 @@ class ShmRingReader:
         self._seg = Segment(name, create=False)
         self._retries = retries
         self._last = -1
-        self._layout = P.unpack_global(self._seg.buf)
+        try:
+            # 写者可能还没写完全局头，magic 校验会抛错；此时要关掉映射，
+            # 否则 attach 重试会泄漏句柄 / memoryview 导出。
+            self._layout = P.unpack_global(self._seg.buf)
+        except Exception:
+            self._seg.close()
+            raise
 
     @property
     def info(self):
