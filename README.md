@@ -1,0 +1,164 @@
+# shmring
+
+**跨语言、无锁的共享内存环形帧总线**：单写者、多读者，零 HTTP、零轮询请求、零互斥量。
+
+Python 写、Node/Electron 读（或反过来），两端直接映射同一块 OS 命名共享内存。`shmring` 把这条链路里最值得复用的部分——**内存布局 + seqlock + 环形覆盖 + 平台适配**——抽成了一个独立库，业务数据只是不透明字节。
+
+> 状态：`v0.1.0` 开发完成，**尚未发布到 PyPI / npm**。当前请从源码使用：
+> `pip install -e .` 与 `npm install`（见下文）。协议见 [PROTOCOL.md](PROTOCOL.md)。
+
+## 为什么需要它
+
+一个常见场景：Python 负责采集/推理，Electron 负责展示。用 HTTP 传帧要付协议栈、序列化、轮询和背压的代价；直接读共享内存则只要一次 `memcpy`。但真正难的不是「读」，是**两边节奏不对齐时如何不撕裂、不丢帧、不堆积延迟**：
+
+- 写者可能在 0.01 ms 内连发数帧，读者每 2 ms 才扫一次 → 单槽必被覆盖；
+- 用队列缓冲则读者卡顿时旧帧越积越多，延迟越滚越大；
+- 不加锁又读到写了一半的槽，就会拿到垃圾数据。
+
+`shmring` 的答案是 **N 槽环形缓冲 + 显式 seqlock**：按帧号取模复用固定槽位，只保留最近 N 帧；写者用奇偶序号声明「写入中 / 已完成」；读者一次扫描批量取走所有新帧，读完双检序号。谁都不等谁，也不需要握手。
+
+## 特性
+
+| | |
+| --- | --- |
+| 传输 | OS 命名共享内存直连，无端口、无协议栈、无轮询请求 |
+| 同步 | 显式 seqlock，无互斥量 / 条件变量 / 系统调用 |
+| 拓扑 | 单写者、多读者；读者各有独立游标 |
+| 语义 | 最近 N 帧的**窗口**，不是队列；宁丢旧帧，不堆积延迟 |
+| 载荷 | 不透明字节 + 可选 meta 字节，库不解析、不假定编码 |
+| 平台 | Windows / Linux / macOS；Node 侧用 `koffi` 纯 JS FFI，**无需 node-gyp 或 C++ 插件** |
+| 协议 | 固定小端、带 magic/version/endianness/capacity 校验，跨语言版本可协商 |
+
+## 安装
+
+```bash
+# Python 端
+pip install -e .
+
+# Node 端
+npm install
+```
+
+发布后将是：
+
+```bash
+pip install shmring
+npm install shmring
+```
+
+依赖：Python ≥ 3.9（仅标准库）；Node ≥ 18 + `koffi ^3.3.8`。
+
+## 快速开始
+
+### Python 写 → Node 读
+
+```python
+# writer.py
+from shmring import ShmRingWriter
+
+w = ShmRingWriter("demo", capacity=8 * 1024 * 1024)  # 4 槽，每槽 meta 256B
+w.publish(b"\xff\xd8...jpeg bytes...", meta=b'{"mime":"image/jpeg"}')
+# 进程需要保持存活，段才存在
+```
+
+```js
+// reader.js
+const { ShmRingReader } = require('shmring');
+
+const r = new ShmRingReader('demo');
+const f = r.read();                    // 最新一帧
+console.log(f.frameId, f.payload, f.meta.toString());
+
+const batch = r.readBatch();           // 自上次以来的所有新帧
+console.log(batch.frames.length, batch.dropped);
+r.detach();
+```
+
+### 反向（Node 写 → Python 读）
+
+```js
+const { ShmRingWriter } = require('shmring');
+const w = new ShmRingWriter('demo2');
+w.publish(Buffer.from('hello'), Buffer.from('topic=a'));
+```
+
+```python
+from shmring import ShmRingReader
+with ShmRingReader("demo2") as r:
+    print(r.read().payload)            # b'hello'
+```
+
+可跑的完整示例在 [`examples/`](examples/)，跨语言对拍脚本见 `node scripts/interop.js`。
+
+## API
+
+### Python
+
+| 对象 | 方法 / 属性 | 说明 |
+| --- | --- | --- |
+| `ShmRingWriter(name, capacity, slot_count, meta_capacity, replace=False)` | `publish(payload, meta=b"", stamp=None) -> frame_id` | 写一帧，返回帧号；`payload`/`meta` 支持 buffer protocol |
+| | `info`, `payload_capacity`, `meta_capacity` | 布局信息 |
+| | `close()`, `unlink()`, 上下文管理器 | `unlink()` 删除 OS 对象（Windows 为 no-op） |
+| `ShmRingReader(name, retries=8)` | `read() -> Frame \| None` | 最新完整帧；`Frame(frame_id, stamp, payload, meta, seq)` |
+| | `read_batch(since=None) -> Batch` | `Batch(frames, dropped, newest)`；`since=None` 用自身游标 |
+| | `info`, `last_frame_id`, `close()` / `detach()` | |
+| 模块级 | `unlink(name)`, `normalize_name(name, for_posix)` | 清理残留段 / 名字归一化 |
+
+### Node
+
+| 对象 | 方法 / 属性 | 说明 |
+| --- | --- | --- |
+| `new ShmRingWriter(name, {capacity, slotCount, metaCapacity})` | `publish(payload, meta, stamp?) -> frameId` | 载荷为 Buffer / Uint8Array / string |
+| | `info`, `payloadCapacity`, `metaCapacity` | |
+| | `close()`, `unlink()` | |
+| `new ShmRingReader(name, {retries})` | `read() -> {frameId, stamp, payload, meta, seq} \| null` | Buffer 载荷 |
+| | `readBatch(since?) -> {frames, dropped, newest}` | |
+| | `info`, `lastFrameId`, `close()` / `detach()` | |
+| 模块级 | `unlink(name)`, `normalizeName(name, forPosix)` | |
+
+错误类型：两端都提供 `ProtocolError` / `SegmentNotFound` / `CapacityError` / `ShmRingError`（Node 另有 `SegmentExists`）。
+
+## 平台支持状态
+
+| 平台 | Python 后端 | Node 后端 | 验证情况 |
+| --- | --- | --- | --- |
+| Windows | `multiprocessing.shared_memory` → `CreateFileMapping` | `OpenFileMappingW` / `CreateFileMappingW` + `MapViewOfFile`（koffi） | **本机实测通过**：双向跨语言对拍、单测全绿 |
+| Linux | 同上 → `shm_open` | `libc.so.6`：`shm_open` / `ftruncate` / `mmap`（koffi） | 由 CI 矩阵覆盖，**本机未实测** |
+| macOS | 同上 → `shm_open` | `libSystem.B.dylib`（含 31 字节段名限制、Darwin `O_CREAT` 常量） | 由 CI 矩阵覆盖，**本机未实测** |
+
+平台差异由库内部消化：POSIX 段名自动加前导 `/`；Python 3.8–3.12 的 `resource_tracker` 误删问题在 attach 时 `unregister`（3.13+ 用 `track=False`）。
+
+> 已知坑：Node 侧**不要**用 `koffi.view()` 把映射地址包成零拷贝视图——在 Electron 内置 Node 下会触发 `napi_is_detached_arraybuffer` FATAL ERROR。库内部统一用 `koffi.address()` + `memcpy` 复制到独立 Buffer。
+
+## 限制
+
+1. **单写者**：多个进程同时 `publish()` 会破坏 seqlock，v1 不支持。
+2. **内存序**：依赖 8 字节对齐读写的原子性与写顺序，x86/x64 保证；ARM 等弱内存序平台未验证。
+3. **容量**：`capacity` 用 `uint32` 存储，上限 4 GiB − 1。
+4. **丢帧**：读者落后超过 `slot_count` 帧，旧槽已被覆盖，会跳过并计入 `dropped`（设计取舍）。
+5. **`replace` 语义差异**：POSIX 上是「删名重建」；Windows 无法 `shm_unlink`，改为「重新 attach 并在原位重置」，要求几何参数一致，且调用方须确保没有活跃写者。
+6. `stamp` 仅用于帧龄诊断，允许时钟回拨，不参与正确性判断。
+
+## 测试
+
+```bash
+python -m unittest discover -s tests -v   # Python 单测
+npm test                                   # Node 单测（node --test）
+node scripts/interop.js                    # 跨语言双向对拍
+```
+
+CI 在 `ubuntu-latest` / `macos-latest` / `windows-latest` 三个平台跑完整矩阵，见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)。
+
+## 路线图
+
+- [ ] 发布 `shmring` 到 PyPI 与 npm
+- [ ] Node 端补 `replace` / 重置已有段能力（目前仅 Python 端提供）
+- [ ] ARM / 弱内存序平台的屏障验证
+- [ ] 可选的 CRC32 校验（槽头已预留 `checksum` 字段）
+- [ ] Rust / C 参考实现，进一步证明协议语言无关
+
+## 协议与许可
+
+完整线上格式、状态机、校验规则与兼容性承诺见 [PROTOCOL.md](PROTOCOL.md)。修改协议必须提升 `VERSION`。
+
+MIT © 2026 meta_codes

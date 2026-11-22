@@ -1,0 +1,32 @@
+{
+  "name": "shmring",
+  "version": "0.1.0",
+  "description": "Lock-free cross-language shared-memory ring buffer: single writer, many readers, zero HTTP",
+  "main": "index.js",
+  "type": "commonjs",
+  "license": "MIT",
+  "author": "meta_codes",
+  "keywords": [
+    "shared-memory", "ring-buffer", "ipc", "seqlock", "electron",
+    "python", "zero-copy", "frame", "lock-free"
+  ],
+  "engines": { "node": ">=18" },
+  "os": ["win32", "linux", "darwin"],
+  "files": [
+    "index.js", "lib/", "PROTOCOL.md", "README.md", "LICENSE", "CHANGELOG.md"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "example:read": "node examples/node_reader.js",
+    "example:write": "node examples/node_writer.js"
+  },
+  "dependencies": {
+    "koffi": "^3.3.8"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://gitee.com/meta_codes/shmring.git"
+  },
+  "bugs": { "url": "https://gitee.com/meta_codes/shmring/issues" },
+  "homepage": "https://gitee.com/meta_codes/shmring"
+}
