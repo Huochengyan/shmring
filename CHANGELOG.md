@@ -5,6 +5,15 @@ The wire format is versioned independently in [PROTOCOL.md](PROTOCOL.md).
 
 ## Unreleased
 
+- Added `.github/workflows/publish.yml` for Trusted Publishing (OIDC) from
+  GitHub Actions starting with 0.1.1: `v*` tag triggers, `id-token: write`,
+  no token or secret in the repo, automatic provenance. Deliberately omits
+  `registry-url` on `setup-node` (it injects a `NODE_AUTH_TOKEN` placeholder
+  that prevents the OIDC exchange) and pins npm CLI >= 11.5.1.
+- Documented the release flow in `README.md`: the 0.1.0 npm first publish is
+  done locally via `npm login` (Trusted Publishing is CI-only and needs the
+  package to already exist), plus the one-time npmjs.com trusted-publisher
+  settings and the 48-hour binding window.
 - Clarified positioning in `README.md` with a new "适用场景与不适用" section:
   decision criteria, direct-use scenarios, adaptation requirements for continuous
   streams (blocking, sequence numbers, CRC32, independent persistence), and

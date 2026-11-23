@@ -1,0 +1,81 @@
+name: publish
+
+# Trusted Publishing (OIDC) 发布通道，供 0.1.1 及之后的版本使用。
+#
+# 为什么首版 0.1.0 不走这里：
+#   1. Trusted Publishing 只认 CI/CD 云托管 runner 里跑的 `npm publish`
+#      （GitHub Actions / GitLab CI/CD / CircleCI），本机终端与 self-hosted
+#      runner 都不支持，npm CLI 需要 >= 11.5.1、Node >= 22.14.0。
+#   2. npm 官网的 Trusted Publisher 配置入口挂在包自己的 Settings 页，
+#      包还没发布就没有这个页面；npm/cli#8544（OIDC 首发）仍未实现。
+#   所以首版由维护者本机 `npm login` + `npm publish` 落地，之后切 OIDC。
+#
+# 首次启用前的 npmjs.com 配置（只需一次）：
+#   https://www.npmjs.com/package/shmring -> Settings -> Trusted publishing
+#     Organization or user : Huochengyan
+#     Repository           : shmring
+#     Workflow filename    : publish.yml      （只填文件名，必须带 .yml）
+#     Environment name     : 留空
+#     Allowed actions      : 勾选 npm publish
+#       注意：2026-09-03 之后新建的配置默认只允许 `npm stage publish`，
+#       不勾 npm publish 会导致 401/404。
+#   配置创建后须在 48 小时内完成首次发布以完成绑定，否则过期需删掉重建。
+#
+# 发版流程（0.1.1 起）：
+#   npm version patch                     # 改 package.json + commit + tag v0.1.1
+#   git push origin master --follow-tags  # tag 触发本 workflow
+#   不要在首版 0.1.0 上打 v* tag：那时 trusted publisher 尚未绑定，会失败。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write          # OIDC 必需；npm CLI 靠它换取短期发布凭证
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest  # Trusted Publishing 只支持云托管 runner
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          # 故意不设 registry-url：setup-node 会写入
+          # //registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN} 占位符，
+          # npm 会据此优先走 token 认证，OIDC 交换就不会被触发。
+          # npm 默认 registry 本来就是 https://registry.npmjs.org。
+
+      - name: Ensure npm CLI >= 11.5.1 (trusted publishing)
+        run: |
+          npm install -g "npm@^11.5.1"
+          npm --version
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Node unit tests
+        run: npm test
+
+      - name: Verify packed artifacts
+        run: |
+          npm pack --dry-run --json > /tmp/pack.json
+          node -e '
+            const d = require("/tmp/pack.json")[0];
+            const leaks = d.files.filter(f =>
+              f.path.includes("node_modules") ||
+              f.path.endsWith("package-lock.json"));
+            if (leaks.length) { console.error("leaks:", leaks); process.exit(1); }
+            if (!d.files.some(f => f.path === "index.js")) {
+              console.error("index.js missing"); process.exit(1);
+            }
+            console.log("packed " + d.files.length + " files, " + d.size + " bytes, no leaks");
+          '
+
+      # 无任何 token / secret：npm CLI 自动检测 OIDC 环境并换取短期凭证，
+      # provenance 证明也会自动生成，不需要 --provenance 参数。
+      - name: Publish via OIDC
+        run: npm publish

@@ -215,12 +215,51 @@ python scripts/bench_multi.py              # 1 路 vs 5 路并发基准
 python scripts/verify_multi.py             # 5 段跨语言端到端验证
 ```
 
-CI 在 `ubuntu-latest` / `macos-latest` / `windows-latest` 三个平台跑完整矩阵，见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)。
+CI 在 `ubuntu-latest` / `macos-latest` / `windows-latest` 三个平台跑完整矩阵，见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)；OIDC 发布通道见 [`.github/workflows/publish.yml`](.github/workflows/publish.yml)。
+
+## 发布
+
+Python 包发到 PyPI，Node 包发到 npm，版本号保持一致。
+
+### 首版 0.1.0（一次性，人工认证）
+
+PyPI 已发布。npm 首版由维护者本机完成：
+
+```bash
+npm login          # 浏览器授权，登录态写入 ~/.npmrc
+npm publish        # 发布 package.json 里的版本
+```
+
+不需要生成勾了 "Bypass two-factor authentication" 的长期 token。npm 会提示「自动化 / CI/CD 请改用 Trusted Publishing」——这条建议针对长期存在的写 token，而 Trusted Publishing **只在 CI 云托管 runner 里可用**，且配置入口挂在包自己的 Settings 页（包还不存在时无法配置，OIDC 首发也尚未支持）。所以首版用一次性人工认证正是官方迁移文档认可的过渡做法。
+
+### 后续版本（Trusted Publishing / OIDC）
+
+[`publish.yml`](.github/workflows/publish.yml) 在 `v*` tag 推送时触发，靠 GitHub Actions 的 OIDC 短期凭证发布：**仓库不存任何 token**，provenance 证明自动生成。首次启用前在 npmjs.com 配置一次：
+
+| 字段 | 值 |
+| --- | --- |
+| 入口 | `npmjs.com/package/shmring` → Settings → Trusted publishing |
+| Organization or user | `Huochengyan` |
+| Repository | `shmring` |
+| Workflow filename | `publish.yml`（只填文件名，须带 `.yml`） |
+| Environment name | 留空 |
+| Allowed actions | 勾 **`npm publish`**（2026-09-03 后新建的配置默认只给 `npm stage publish`，不勾会 401/404） |
+
+配置创建后须在 **48 小时内完成一次成功发布**才算绑定生效，过期需删掉重建。之后发版：
+
+```bash
+npm version patch                     # 0.1.0 → 0.1.1，自动 commit + tag v0.1.1
+git push origin master --follow-tags
+```
+
+绑定完成后可把包的 Publishing access 设为 **"Require two-factor authentication and disallow tokens"**，彻底关闭传统 token 通道（该设置只影响 token，不影响 OIDC）。PyPI 侧同理可用 Trusted Publisher 替代 API token。
+
+> 首版 0.1.0 **不要打 `v*` tag**：那时 trusted publisher 尚未绑定，会触发失败的发布 job。
 
 ## 路线图
 
 - [x] 发布 `shmring` 0.1.0 到 PyPI（2026-11-22）
-- [ ] 发布到 npm（首版需人工认证，之后可配 Trusted Publisher 免 token）
+- [ ] 发布到 npm 0.1.0（首版本机 `npm login`；0.1.1 起走 Trusted Publishing，见「发布」）
 - [ ] Node 端补 `replace` / 重置已有段能力（目前仅 Python 端提供）
 - [ ] ARM / 弱内存序平台的屏障验证
 - [ ] 可选的 CRC32 校验（槽头已预留 `checksum` 字段）
