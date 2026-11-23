@@ -264,6 +264,7 @@ git push origin master --follow-tags
 
 ## 路线图
 
+- [ ] **v2 无损队列**（双游标 + 背压，支持连续采样流）：设计见 [V2_DESIGN.md](V2_DESIGN.md)，**尚未实现**；v1 语义保持「最新优先、可丢」不变
 - [x] 发布 `shmring` 0.1.0 到 PyPI（2026-11-22）
 - [ ] 发布到 npm 0.1.0（首版本机 `npm login`；0.1.1 起走 Trusted Publishing，见「发布」）
 - [ ] Node 端补 `replace` / 重置已有段能力（目前仅 Python 端提供）
@@ -274,5 +275,6 @@ git push origin master --follow-tags
 ## 协议与许可
 
 完整线上格式、状态机、校验规则与兼容性承诺见 [PROTOCOL.md](PROTOCOL.md)。修改协议必须提升 `VERSION`。
+v1 现状与 v2（无损队列）的逐项改动清单见 [V2_DESIGN.md](V2_DESIGN.md)——那是设计稿，当前仓库只实现 v1。
 
 MIT © 2026 meta_codes

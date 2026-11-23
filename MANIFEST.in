@@ -1,4 +1,4 @@
-include PROTOCOL.md CHANGELOG.md LICENSE README.md scripts/bench_multi.py scripts/verify_multi.py
+include PROTOCOL.md V2_DESIGN.md CHANGELOG.md LICENSE README.md scripts/bench_multi.py scripts/verify_multi.py
 recursive-include examples *.md *.py *.js *.json *.html *.css *.txt
 prune examples/electron-camera/node_modules
 prune examples/electron-multi-camera/node_modules

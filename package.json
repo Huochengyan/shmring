@@ -37,7 +37,7 @@
     "examples/electron-multi-camera/renderer/style.css",
     "scripts/bench_multi.py",
     "scripts/verify_multi.py",
-    "PROTOCOL.md", "README.md", "LICENSE", "CHANGELOG.md"
+    "PROTOCOL.md", "V2_DESIGN.md", "README.md", "LICENSE", "CHANGELOG.md"
   ],
   "scripts": {
     "test": "node --test",

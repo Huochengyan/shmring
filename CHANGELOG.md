@@ -5,6 +5,14 @@ The wire format is versioned independently in [PROTOCOL.md](PROTOCOL.md).
 
 ## Unreleased
 
+- Added [`V2_DESIGN.md`](V2_DESIGN.md): a design-only document (no code) that
+  records the v1 0.1.0 baseline with exact code/protocol references, the v1
+  cleanup list for 0.2.0 (no wire change), and the full v1 -> v2 change table
+  for a lossless queue: shared `write_pos`/`read_pos[]` cursors, reader
+  write-back, backpressure/spill on full, acquire/release atomics, CRC32,
+  block sequence numbers, writer liveness, delivery semantics, header draft,
+  pseudocode, compatibility rules and acceptance criteria. Linked from
+  `README.md` (roadmap + protocol section); included in npm/sdist manifests.
 - Added `.github/workflows/publish.yml` for Trusted Publishing (OIDC) from
   GitHub Actions starting with 0.1.1: `v*` tag triggers, `id-token: write`,
   no token or secret in the repo, automatic provenance. Deliberately omits
