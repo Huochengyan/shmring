@@ -221,16 +221,22 @@ CI 在 `ubuntu-latest` / `macos-latest` / `windows-latest` 三个平台跑完整
 
 Python 包发到 PyPI，Node 包发到 npm，版本号保持一致。
 
-### 首版 0.1.0（一次性，人工认证）
+### 首版 0.1.0（一次性，交互式 2FA）
 
-PyPI 已发布。npm 首版由维护者本机完成：
+PyPI 已发布。npm 首版必须由维护者本人在**交互式终端**完成（账号需已启用 2FA）：
 
 ```bash
-npm login          # 浏览器授权，登录态写入 ~/.npmrc
-npm publish        # 发布 package.json 里的版本
+npm login          # 浏览器授权
+npm publish        # 按提示输入 authenticator 的 6 位 OTP
+# 非交互场景可显式传码：npm publish --otp=123456（30 秒内有效）
 ```
 
-不需要生成勾了 "Bypass two-factor authentication" 的长期 token。npm 会提示「自动化 / CI/CD 请改用 Trusted Publishing」——这条建议针对长期存在的写 token，而 Trusted Publishing **只在 CI 云托管 runner 里可用**，且配置入口挂在包自己的 Settings 页（包还不存在时无法配置，OIDC 首发也尚未支持）。所以首版用一次性人工认证正是官方迁移文档认可的过渡做法。
+两条自动化路径在首发都被堵死：
+
+- **Bypass-2FA Granular Access Token 已不能直接发布**。按 [GitHub Changelog 2026-07-31](https://github.blog/changelog/2026-07-31-restricting-npm-bypass-2fa-granular-access-tokens/)，这类 token 先是被禁止账号/包治理操作，随后连 direct publish 一并收回（CLI 会打印 `npm tokens that bypass 2FA are being restricted for account changes and direct publishing`），2027-01 起只保留「读私有包 + stage」，须由维护者用 2FA 批准。实测 `npm publish` 返回 403 `Two-factor authentication or granular access token with bypass 2fa enabled is required`。
+- **Trusted Publishing 只在 CI 云托管 runner 里可用**，且配置入口挂在包自己的 Settings 页；包还不存在时无法配置，OIDC 首发也尚未支持（npm/cli#8544）。
+
+所以首版走官方默认的「交互式发布 + 2FA」是唯一可行解，而不是退而求其次。
 
 ### 后续版本（Trusted Publishing / OIDC）
 

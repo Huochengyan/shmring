@@ -10,10 +10,14 @@ The wire format is versioned independently in [PROTOCOL.md](PROTOCOL.md).
   no token or secret in the repo, automatic provenance. Deliberately omits
   `registry-url` on `setup-node` (it injects a `NODE_AUTH_TOKEN` placeholder
   that prevents the OIDC exchange) and pins npm CLI >= 11.5.1.
-- Documented the release flow in `README.md`: the 0.1.0 npm first publish is
-  done locally via `npm login` (Trusted Publishing is CI-only and needs the
-  package to already exist), plus the one-time npmjs.com trusted-publisher
-  settings and the 48-hour binding window.
+- Documented the release flow in `README.md`: the 0.1.0 npm first publish must
+  be interactive with 2FA (`npm login` + OTP). Bypass-2FA granular tokens can
+  no longer direct-publish (GitHub Changelog 2026-07-31; `npm publish` returns
+  E403), and Trusted Publishing is CI-only with a chicken-and-egg requirement
+  that the package already exist. Also lists the one-time npmjs.com
+  trusted-publisher settings and the 48-hour binding window for 0.1.1+.
+- Normalized `repository.url` to the `git+https://` form npm expects, removing
+  the `npm publish` auto-correct warning.
 - Clarified positioning in `README.md` with a new "适用场景与不适用" section:
   decision criteria, direct-use scenarios, adaptation requirements for continuous
   streams (blocking, sequence numbers, CRC32, independent persistence), and
