@@ -1,4 +1,12 @@
-# 5 路并发 showcase（合成帧）
+# 5 路并发 showcase
+
+一个 Python 进程开 5 个 `ShmRingWriterV2`（overwrite），Electron 一个循环扫 5 个 `ShmRingReaderV2`。
+
+默认带 `--real-camera`：第 1 路是 ffmpeg 读到的 JPEG。没有 ffmpeg 或摄像头时，这一路退回合成 PNG，控制台打印 `real-camera=no`。设 `DEMO_REAL_CAMERA=0` 可关掉。无头校验不传这个参数：
+
+```bash
+python scripts/verify_multi.py
+```
 
 `shmring` 的**多段并发示例**：一个 Python 进程同时开 5 个 `ShmRingWriter`，各写各的命名段；Electron 主进程用**一个** 2ms 循环遍历 5 个 `ShmRingReader`，把这一轮 5 路的帧打包成**一次** IPC，渲染进程 5 宫格显示。全程无 HTTP、无端口、无摄像头依赖。
 

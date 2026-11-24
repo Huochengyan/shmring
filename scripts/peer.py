@@ -27,7 +27,40 @@ def main() -> None:
     ap.add_argument("--capacity", type=int, default=1024 * 1024)
     ap.add_argument("--slots", type=int, default=4)
     ap.add_argument("--meta", type=int, default=64)
+    ap.add_argument("--v2", action="store_true")
     args = ap.parse_args()
+
+    if args.v2:
+        from shmring import ShmRingReaderV2, ShmRingWriterV2
+        if args.role == "writer":
+            try:
+                unlink(args.name)
+            except Exception:
+                pass
+            w = ShmRingWriterV2(
+                args.name, capacity=args.capacity, slot_count=args.slots,
+                meta_capacity=args.meta, replace=True,
+            )
+            for i in range(args.count):
+                w.publish(f"py-frame-{i}".encode(), f"py-meta-{i}".encode())
+            print("READY", flush=True)
+            try:
+                time.sleep(args.hold)
+            finally:
+                w.close()
+            return
+        r = ShmRingReaderV2(args.name, join="window")
+        batch = r.read_batch()
+        for frame in batch.frames:
+            r.commit(frame.seq)
+        print(json.dumps({
+            "seqs": [f.seq for f in batch.frames],
+            "payloads": [f.payload.decode("utf-8", "replace") for f in batch.frames],
+            "metas": [f.meta.decode("utf-8", "replace") for f in batch.frames],
+            "gap": None if batch.gap is None else {"dropped": batch.gap.dropped, "next": batch.gap.next_seq},
+        }), flush=True)
+        r.close()
+        return
 
     if args.role == "writer":
         try:

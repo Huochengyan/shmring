@@ -25,15 +25,15 @@ NODE_CODE = r"""
 const shm = require(process.argv[1]);
 const names = JSON.parse(process.argv[2]);
 const out = names.map((n, i) => {
-  const r = new shm.ShmRingReader(n);
-  const b = r.readBatch(-1);
+  const r = new shm.ShmRingReaderV2(n, { join: 'window' });
+  const b = r.readBatch();
   const f = b.frames.length ? b.frames[b.frames.length - 1] : null;
   r.close();
   return {
     cam: i + 1,
     frames: b.frames.length,
-    newest: b.newest,
-    dropped: b.dropped,
+    newest: f ? f.seq : -1,
+    dropped: b.gap ? b.gap.dropped : 0,
     bytes: f ? f.payload.length : 0,
     meta: f ? f.meta.toString() : '',
     png: f ? f.payload.slice(0, 8).toString('hex') : '',
@@ -79,8 +79,7 @@ def main() -> int:
             return 1
         rows = json.loads(result.stdout.strip().splitlines()[-1])
         assert len(rows) == 5, f"expected 5 segments, got {len(rows)}"
-        # readBatch(-1) 从 cursor=-1 起读，dropped 是「首次读取前的历史帧数」，
-        # 属于「最近 4 帧窗口」语义，不是运行期丢帧；稳态丢帧见 bench_multi.py。
+        # join=window 读到当前还在环里的帧。dropped 只在窗口起点之前有空洞时非 0。
         for row in rows:
             cam = row["cam"]
             assert row["frames"] > 0, f"cam {cam}: no frames read"

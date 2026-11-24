@@ -8,11 +8,11 @@
 const shm = require('../index.js');
 
 function parseArgs(argv) {
-  const out = { role: null, name: null, count: 7, hold: 8, capacity: 1024 * 1024, slots: 4, meta: 64 };
+  const out = { role: null, name: null, count: 7, hold: 8, capacity: 1024 * 1024, slots: 4, meta: 64, v2: 0 };
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i].replace(/^--/, '');
     const raw = argv[i + 1];
-    out[key] = ['count', 'hold', 'capacity', 'slots', 'meta'].includes(key) ? Number(raw) : raw;
+    out[key] = ['count', 'hold', 'capacity', 'slots', 'meta', 'v2'].includes(key) ? Number(raw) : raw;
   }
   return out;
 }
@@ -23,7 +23,30 @@ if (!a.role || !a.name) {
   process.exit(2);
 }
 
-if (a.role === 'writer') {
+if (a.v2) {
+  if (a.role === 'writer') {
+    try { shm.unlink(a.name); } catch (_) { /* Windows: no-op */ }
+    const w = new shm.ShmRingWriterV2(a.name, {
+      capacity: a.capacity, slotCount: a.slots, metaCapacity: a.meta, replace: true,
+    });
+    for (let i = 0; i < a.count; i++) {
+      w.publish(Buffer.from(`node-frame-${i}`), Buffer.from(`node-meta-${i}`));
+    }
+    console.log('READY');
+    setTimeout(() => { w.close(); process.exit(0); }, a.hold * 1000);
+  } else {
+    const r = new shm.ShmRingReaderV2(a.name, { join: 'window' });
+    const b = r.readBatch();
+    for (const frame of b.frames) r.commit(frame.seq);
+    console.log(JSON.stringify({
+      seqs: b.frames.map((x) => x.seq),
+      payloads: b.frames.map((x) => x.payload.toString('utf8')),
+      metas: b.frames.map((x) => x.meta.toString('utf8')),
+      gap: b.gap,
+    }));
+    r.close();
+  }
+} else if (a.role === 'writer') {
   try { shm.unlink(a.name); } catch (_) { /* Windows: no-op */ }
   const w = new shm.ShmRingWriter(a.name, {
     capacity: a.capacity, slotCount: a.slots, metaCapacity: a.meta,

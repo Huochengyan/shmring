@@ -17,3 +17,7 @@ class SegmentNotFound(ShmRingError):
 
 class CapacityError(ShmRingError):
     """Payload or meta exceeds the slot capacity configured at create() time."""
+
+
+class ChecksumError(ShmRingError):
+    """Slot checksum did not match the copied payload and meta. Cursor is unchanged."""

@@ -4,7 +4,7 @@
 
 Python 写、Node/Electron 读（或反过来），两端直接映射同一块 OS 命名共享内存。`shmring` 把这条链路里最值得复用的部分——**内存布局 + seqlock + 环形覆盖 + 平台适配**——抽成了一个独立库，业务数据只是不透明字节。
 
-> 状态：`v0.1.0` 已发布到 **PyPI**（`pip install shmring`）；npm 首个版本待发布，
+> 状态：`v0.2.0` 已发布到 **PyPI**（`pip install shmring`）；npm 首个版本待发布，
 > 当前 Node 侧请从源码使用 `npm install`（见下文）。协议见 [PROTOCOL.md](PROTOCOL.md)。
 
 ## 为什么需要它
@@ -152,7 +152,7 @@ ffmpeg MJPEG → ShmRingWriter.publish(jpeg, meta)
 
 ### 5 路并发：一路一段
 
-[`examples/electron-multi-camera/`](examples/electron-multi-camera/) 是第二档 showcase：一个 Python 进程开 5 个 `ShmRingWriter` 各写各的命名段，Electron 用**一个** 2ms 循环遍历 5 个 reader、一次批量 IPC、5 宫格渲染，全部用合成帧，不依赖摄像头。
+[`examples/electron-multi-camera/`](examples/electron-multi-camera/) 是第二档 showcase：一个 Python 进程开 5 个 `ShmRingWriterV2` 各写各的命名段（overwrite，写者不等读者），Electron 用**一个** 2ms 循环遍历 5 个 v2 reader、一次批量 IPC、5 宫格渲染。默认第 1 路尝试真实摄像头，其余四路是合成 PNG；没有摄像头时五路都是合成帧。无头校验 `scripts/verify_multi.py` 不打开摄像头。
 
 它演示的是「同一进程内多个 writer 实例互不干扰」——帧号、`seq`、槽几何、线程锁全部实例隔离，一路卡住不影响其余四路。配套 [`scripts/bench_multi.py`](scripts/bench_multi.py) 的实测：限速 30fps/路时 5 路合计 **147.2 fps、丢帧 0、帧龄 avg 1.41ms**；不限速纯 publish 达到 133638 fps（5473.8 MB/s），5 路 / 1 路 = 0.76×，说明 CPython 下 GIL 使同进程多线程没有并行加速，但也证明传输层远不是瓶颈。详见 [该目录 README](examples/electron-multi-camera/README.md)。
 
@@ -182,7 +182,13 @@ ffmpeg MJPEG → ShmRingWriter.publish(jpeg, meta)
 | | `info`, `lastFrameId`, `close()` / `detach()` | |
 | 模块级 | `unlink(name)`, `normalizeName(name, forPosix)` | |
 
-错误类型：两端都提供 `ProtocolError` / `SegmentNotFound` / `CapacityError` / `ShmRingError`（Node 另有 `SegmentExists`）。
+错误类型：两端都提供 `ProtocolError` / `SegmentNotFound` / `CapacityError` / `ShmRingError`（Node 另有 `SegmentExists`）。v2 另有 `ChecksumError`。
+
+### v2
+
+`ShmRingWriterV2` / `ShmRingReaderV2`（Node 同名）。`publish()` 返回 `{accepted, frame_id}`，默认 `overflow="overwrite"`，写者不等读者。读者默认 `role="observer"`、`join="tip"`（只看新帧）；`join="window"` 从环里还在的最老一帧读起。`read()` 不推进游标，处理完调用 `commit(seq)`；跟不上时 `read_batch()` 给出 `Gap`，用 `skip_to(next_seq)` 接受丢失。`return` 下最多一个 `retainer`，过期心跳不再占环。校验默认 CRC32。
+
+五路示例默认用 v2 overwrite。Electron 启动时加 `--real-camera`（`DEMO_REAL_CAMERA=0` 可关）：第 1 路是摄像头 JPEG，没有设备就退回合成 PNG。`scripts/verify_multi.py` 不打开摄像头，五路都断言 PNG。
 
 ## 平台支持状态
 
@@ -264,8 +270,8 @@ git push origin master --follow-tags
 
 ## 路线图
 
-- [ ] **v2 无损队列**（双游标 + 背压，支持连续采样流）：设计见 [V2_DESIGN.md](V2_DESIGN.md)，**尚未实现**；v1 语义保持「最新优先、可丢」不变
-- [x] 发布 `shmring` 0.1.0 到 PyPI（2026-11-22）
+- [x] **v2**：写者不等读者；环满时覆盖，或把该帧立刻交还调用方。Python 与 Node 已实现，见 [V2_DESIGN.md](V2_DESIGN.md)。v1 语义保持「最新优先、可丢」不变
+- [x] 发布 `shmring` 0.2.0 到 PyPI（2026-11-24）；0.1.0 仍在 PyPI（2026-11-22）
 - [ ] 发布到 npm 0.1.0（首版本机 `npm login`；0.1.1 起走 Trusted Publishing，见「发布」）
 - [ ] Node 端补 `replace` / 重置已有段能力（目前仅 Python 端提供）
 - [ ] ARM / 弱内存序平台的屏障验证
@@ -275,6 +281,6 @@ git push origin master --follow-tags
 ## 协议与许可
 
 完整线上格式、状态机、校验规则与兼容性承诺见 [PROTOCOL.md](PROTOCOL.md)。修改协议必须提升 `VERSION`。
-v1 现状与 v2（无损队列）的逐项改动清单见 [V2_DESIGN.md](V2_DESIGN.md)——那是设计稿，当前仓库只实现 v1。
+v2 见 [V2_DESIGN.md](V2_DESIGN.md)。写者不等读者；环满时覆盖或把该帧交还调用方。默认导出仍是 v1。
 
 MIT © 2026 meta_codes

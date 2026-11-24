@@ -12,8 +12,14 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('status', listener);
     return () => ipcRenderer.removeListener('status', listener);
   },
+  onSeries: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('series', listener);
+    return () => ipcRenderer.removeListener('series', listener);
+  },
   getStats: () => ipcRenderer.invoke('get-stats'),
   getServerInfo: () => ipcRenderer.invoke('get-server-info'),
   setPaused: (value) => ipcRenderer.send('set-paused', value),
+  setScanInterval: (ms) => ipcRenderer.send('set-scan-interval', ms),
   reportRenderCheck: (rows) => ipcRenderer.send('render-check', rows),
 });

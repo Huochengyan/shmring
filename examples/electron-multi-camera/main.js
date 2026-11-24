@@ -41,7 +41,7 @@ try {
 const CAM_COUNT = Math.max(1, Number(process.env.DEMO_CAMS || 5));
 const TARGET_FPS = Number(process.env.DEMO_FPS || 30);
 const BUFFER_KB = Number(process.env.DEMO_BUFFER_KB || 512);
-const SCAN_INTERVAL_MS = 2;
+let scanIntervalMs = 2;
 const STALE_MS = 2000;   // 某路超过 2s 没有新帧就判定离线
 const ATTACH_TIMEOUT_MS = 15000;
 // 无人值守冒烟用：设置后到点自动 app.quit()，走 before-quit 正常关 reader / Python。
@@ -50,6 +50,7 @@ const AUTO_QUIT_MS = Number(process.env.DEMO_AUTO_QUIT_MS || 0);
 // 随机前缀避免与上次崩溃残留的段撞名；5 个名字互不相同。
 const SHM_PREFIX = 'shmring_multi_' + crypto.randomBytes(3).toString('hex');
 const SHM_NAMES = Array.from({ length: CAM_COUNT }, (_, i) => `${SHM_PREFIX}_${i + 1}`);
+const SERIES_NAME = `${SHM_PREFIX}_series`;
 
 const PY_ARGS = [
   path.join(__dirname, 'python', 'server.py'),
@@ -57,7 +58,9 @@ const PY_ARGS = [
   '--cam-count', String(CAM_COUNT),
   '--fps', String(TARGET_FPS),
   '--buffer-kb', String(BUFFER_KB),
+  '--series-name', SERIES_NAME,
 ];
+if (process.env.DEMO_REAL_CAMERA !== '0') PY_ARGS.push('--real-camera');
 
 let mainWindow = null;
 let pythonProcess = null;
@@ -65,6 +68,8 @@ let scanTimer = null;
 let running = false;
 let paused = false;
 let readers = [];
+let seriesReader = null;
+const seriesState = { packets: 0, dropped: 0, lastSeq: -1, online: false };
 let attachedAt = 0;
 let lastLogAt = 0;
 let pythonSource = 'synthetic';
@@ -79,7 +84,7 @@ const perCam = SHM_NAMES.map((name, i) => ({
   lastStamp: 0,
   lastFrameId: -1,
   online: false,
-  meta: { cam: i + 1, mime: 'image/png', w: 0, h: 0 },
+  meta: { cam: i + 1, mime: 'image/png', src: 'synthetic', w: 0, h: 0 },
   metaRaw: null,
 }));
 
@@ -108,6 +113,7 @@ function parseMeta(cam, buf) {
     cam.meta = {
       cam: Number(parsed.cam) || cam.camId,
       mime: parsed.mime || 'image/png',
+      src: parsed.src || 'synthetic',
       w: Number(parsed.w) || 0,
       h: Number(parsed.h) || 0,
     };
@@ -128,7 +134,10 @@ async function attachAll(timeoutMs = ATTACH_TIMEOUT_MS) {
     for (let i = 0; i < CAM_COUNT; i++) {
       if (attached[i]) continue;
       try {
-        attached[i] = new shmring.ShmRingReader(SHM_NAMES[i]);
+        attached[i] = new shmring.ShmRingReaderV2(SHM_NAMES[i], {
+          join: 'tip',
+          role: 'observer',
+        });
         errors[i] = null;
       } catch (error) {
         // 段还没创建，或已创建但全局头未写完（magic 校验失败）→ 继续等
@@ -156,6 +165,10 @@ function closeReaders() {
     if (r) { try { r.close(); } catch (_) { /* 忽略 */ } }
   }
   readers = [];
+  if (seriesReader) {
+    try { seriesReader.close(); } catch (_) { /* 忽略 */ }
+    seriesReader = null;
+  }
 }
 
 // ---------- 单个扫描循环：一次遍历 5 路，一次批量 IPC ----------
@@ -167,37 +180,78 @@ function processCam(i, out) {
   let batch;
   try {
     batch = reader.readBatch();
+    const now = Date.now();
+    for (const f of batch.frames) {
+      reader.commit(f.seq);
+      const meta = parseMeta(cam, f.meta);
+      cam.lastStamp = f.stamp;
+      cam.online = true;
+      cam.arrivals.push(now);
+      if (cam.arrivals.length > 80) cam.arrivals.shift();
+      const age = now - f.stamp;
+      if (age >= 0 && age < 1000) {
+        cam.ages.push(age);
+        if (cam.ages.length > 80) cam.ages.shift();
+      }
+      if (!paused) {
+        out.push({
+          camId: cam.camId,
+          metaCam: meta.cam,
+          buffer: f.payload,
+          mime: meta.mime,
+          width: meta.w,
+          height: meta.h,
+          id: f.seq,
+        });
+      }
+    }
+    if (batch.gap && batch.gap.nextSeq > reader.readPos) {
+      cam.dropped += batch.gap.dropped;
+      reader.skipTo(batch.gap.nextSeq);
+    }
+    cam.lastFrameId = reader.readPos;
   } catch (error) {
     cam.online = false;
-    return;
   }
-  cam.dropped += batch.dropped;
-  cam.lastFrameId = reader.lastFrameId;
-  if (!batch.frames.length) return;
+}
 
-  const now = Date.now();
-  for (const f of batch.frames) {
-    const meta = parseMeta(cam, f.meta);
-    cam.lastStamp = f.stamp;
-    cam.online = true;
-    cam.arrivals.push(now);
-    if (cam.arrivals.length > 80) cam.arrivals.shift();
-    const age = now - f.stamp;
-    if (age >= 0 && age < 1000) {
-      cam.ages.push(age);
-      if (cam.ages.length > 80) cam.ages.shift();
+function processSeries() {
+  if (!seriesReader) return;
+  let batch;
+  try {
+    batch = seriesReader.readBatch();
+    const packets = [];
+    for (const frame of batch.frames) {
+      seriesReader.commit(frame.seq);
+      let meta = {};
+      try { meta = JSON.parse(frame.meta.toString('utf8')); } catch (_) { /* 坏 meta 跳过计数 */ }
+      const channels = Number(meta.ch) || 1;
+      const count = Number(meta.n) || Math.floor(frame.payload.length / (4 * channels));
+      packets.push({
+        seq: frame.seq,
+        i0: Number(meta.i0) || 0,
+        hz: Number(meta.hz) || 512,
+        channels,
+        n: count,
+        payload: frame.payload,
+      });
+      seriesState.packets += 1;
+      seriesState.lastSeq = frame.seq;
+      seriesState.online = true;
     }
-    if (!paused) {
-      out.push({
-        camId: cam.camId,
-        metaCam: meta.cam,
-        buffer: f.payload,
-        mime: meta.mime,
-        width: meta.w,
-        height: meta.h,
-        id: f.frameId,
+    if (batch.gap && batch.gap.nextSeq > seriesReader.readPos) {
+      seriesState.dropped += batch.gap.dropped;
+      seriesReader.skipTo(batch.gap.nextSeq);
+    }
+    if (packets.length && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('series', {
+        packets,
+        dropped: seriesState.dropped,
+        packetsSeen: seriesState.packets,
       });
     }
+  } catch (error) {
+    seriesState.online = false;
   }
 }
 
@@ -205,6 +259,7 @@ function scanSharedMemory() {
   if (!running || !readers.length) return;
   const out = [];
   for (let i = 0; i < CAM_COUNT; i++) processCam(i, out);
+  processSeries();
 
   const now = Date.now();
   for (const cam of perCam) {
@@ -228,7 +283,7 @@ function scanSharedMemory() {
       `帧龄 avg ${avgAge}ms · 累计跳帧 ${dropped} · 离线 ${offline}`
     );
   }
-  scanTimer = setTimeout(scanSharedMemory, SCAN_INTERVAL_MS);
+  scanTimer = setTimeout(scanSharedMemory, scanIntervalMs);
 }
 
 // ---------- Python 子进程 ----------
@@ -264,8 +319,8 @@ async function startPython() {
     child.stdout.on('data', (chunk) => {
       const text = chunk.toString().trimEnd();
       console.log(text);
-      const match = text.match(/names=(\S+)/);
-      if (match) pythonSource = 'synthetic';
+      if (/real-camera=yes/.test(text)) pythonSource = 'camera';
+      else if (/real-camera=no/.test(text)) pythonSource = 'synthetic';
     });
     child.stderr.on('data', (chunk) => console.error(chunk.toString().trimEnd()));
     child.on('exit', (code) => {
@@ -280,11 +335,11 @@ async function startPython() {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 860,
-    minWidth: 960,
+    width: 1440,
+    height: 1000,
+    minWidth: 1100,
     minHeight: 680,
-    title: 'shmring · 5 路并发共享内存 showcase',
+    title: 'shmring · 视频与时序',
     backgroundColor: '#f5f7fb',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -307,8 +362,9 @@ ipcMain.handle('get-stats', () => {
     uptime_seconds: attachedAt ? Math.round((Date.now() - attachedAt) / 100) / 10 : 0,
     source: pythonSource,
     transport: 'shmring',
-    protocol_version: shmring.PROTOCOL_VERSION,
-    scan_interval_ms: SCAN_INTERVAL_MS,
+    protocol_version: shmring.PROTOCOL_VERSION_V2,
+    source_label: pythonSource === 'camera' ? '1 路摄像头 + 4 路合成' : '5 路合成',
+    scan_interval_ms: scanIntervalMs,
     cams: perCam.map((c, i) => ({
       cam_id: c.camId,
       shm_name: c.name,
@@ -319,6 +375,7 @@ ipcMain.handle('get-stats', () => {
       width: c.meta.w,
       height: c.meta.h,
       mime: c.meta.mime,
+      src: c.meta.src || 'synthetic',
       buffer_bytes: readers[i] ? readers[i].info.capacity : 0,
       slot_count: readers[i] ? readers[i].info.slotCount : 4,
     })),
@@ -328,12 +385,22 @@ ipcMain.handle('get-stats', () => {
 ipcMain.handle('get-server-info', () => ({
   camCount: CAM_COUNT,
   names: SHM_NAMES,
+  seriesName: SERIES_NAME,
+  seriesHz: 512,
+  seriesChannels: 160,
   targetFps: TARGET_FPS,
   bufferKb: BUFFER_KB,
-  protocolVersion: shmring ? shmring.PROTOCOL_VERSION : 1,
+  protocolVersion: shmring ? shmring.PROTOCOL_VERSION_V2 : 2,
   pythonPid: pythonProcess ? pythonProcess.pid : null,
-  scanIntervalMs: SCAN_INTERVAL_MS,
+  scanIntervalMs,
 }));
+
+ipcMain.on('set-scan-interval', (_event, value) => {
+  const next = Math.round(Number(value));
+  if (!Number.isFinite(next)) return;
+  scanIntervalMs = Math.min(5000, Math.max(1, next));
+  console.log(`[electron] scan interval ${scanIntervalMs}ms`);
+});
 
 ipcMain.on('set-paused', (_event, value) => {
   paused = Boolean(value);
@@ -363,7 +430,7 @@ app.whenReady().then(async () => {
   }
 
   createWindow();
-  sendStatus(`正在启动 Python 写端（${CAM_COUNT} 路合成帧）…`, 'warn');
+  sendStatus(`正在启动 Python 写端（v2，${CAM_COUNT} 路）…`, 'warn');
   try {
     pythonProcess = await startPython();
   } catch (error) {
@@ -380,18 +447,23 @@ app.whenReady().then(async () => {
     return;
   }
   readers = attached;
+  try {
+    seriesReader = new shmring.ShmRingReaderV2(SERIES_NAME, { join: 'tip', role: 'observer' });
+  } catch (error) {
+    console.error('[electron] series attach failed:', error.message);
+  }
   attachedAt = Date.now();
   running = true;
 
   const info = readers[0].info;
   sendStatus(
-    `已连接：shmring v${shmring.PROTOCOL_VERSION} · ${CAM_COUNT} 段 × ${info.slotCount} 槽 + seqlock`,
+    `已连接：shmring v${shmring.PROTOCOL_VERSION_V2} · ${CAM_COUNT} 段 × ${info.slotCount} 槽`,
     'ok'
   );
   console.log(
     `[electron] attached ${CAM_COUNT} segments (${(info.capacity / 1024).toFixed(0)} KB each, ` +
-    `${info.slotCount} slots, protocol v${shmring.PROTOCOL_VERSION}), ` +
-    `one ${SCAN_INTERVAL_MS}ms loop scanning all readers`
+    `${info.slotCount} slots, protocol v${shmring.PROTOCOL_VERSION_V2}), ` +
+    `one ${scanIntervalMs}ms loop scanning all readers`
   );
   scanSharedMemory();
 

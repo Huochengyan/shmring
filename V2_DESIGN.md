@@ -1,275 +1,302 @@
-# shmring v1 → v2 演进设计
+# shmring v2 设计
 
-> **状态：设计稿，未实现。** 本文把 v1 的实际行为和 v2「无损队列」所需的**全部改动**整理成一份清单。
-> 当前仓库只实现了 v1（`VERSION = 1`，PyPI `shmring 0.1.0`），v2 没有任何代码。
-> 修改线上格式必须提升 `VERSION`，见 [PROTOCOL.md](PROTOCOL.md) 第 8 节「兼容性承诺」。
->
-> 权威的 v1 格式定义始终是 `PROTOCOL.md`；本文是**差异说明与设计方案**，不覆盖它。
+> **状态：已实现（Python `shmring.v2` 与 Node `lib/ring-v2.js`）。** 包的默认 `PROTOCOL_VERSION` 仍是 v1。
+> v2 用 `ShmRingWriterV2` / `ShmRingReaderV2`，不能和 v1 混接同一个段。
+> 权威的 v1 格式仍是 [PROTOCOL.md](PROTOCOL.md)。
 
----
+## 1. 规则
 
-## 0. 一句话结论
+写者不等读者。`publish()` 里不睡眠、不等条件变量、不等磁盘、不读旁路读者的进度。
 
-v1 是「最近 N 帧的**窗口**」，写者无条件覆盖最老的槽；v2 要变成「有背压的**无损队列**」。
-关键不是「给每帧加 id」——id 库里早就有（`frame_id`），只能让你**发现**丢了，不能让你**不丢**。
-不丢帧靠的是：**读者把消费进度写回共享内存 + 写者发现槽满时停下来（背压）或落盘（spill）**。
+环里没有空位时，写者立刻做下面两件事里的一件，然后返回：
 
-还有一个绕不开的硬约束：
+| 策略 | 行为 |
+| --- | --- |
+| `overwrite`（默认） | 新帧写入下一个槽，覆盖槽里的旧帧。返回新帧序号 |
+| `return` | 这个槽仍被**活着的占槽读者**占着时，不改环，把这一帧交还调用方（`accepted=false`）。调用方自己丢弃或另存。库不写盘 |
 
-> **有限容量 + 写者永不阻塞 + 一个样本不丢，三者不可兼得。**
-> 要无损，槽满时必须在「阻塞等待」和「溢出写盘」里二选一。v1 选了「永不阻塞」，代价就是必然丢旧帧。
+慢的旁路读者只丢掉自己没跟上的帧。其他读者继续读自己还够得着的帧，写者继续发布。
 
----
+有限容量、写者永不阻塞、每一帧都留在环里，三者不能同时成立。v2 把取舍交给策略：`overwrite` 丢掉没跟上的那一路；`return` 拒绝收下新帧，由调用方处理。两种策略都不在 `publish()` 里等人。
 
-## 1. 为什么需要 v2
+## 2. 读者两种角色
 
-v1 为视频设计：每帧自包含、最新优先、允许静默丢历史。实测（Windows，640×360 MJPEG）30 fps、帧龄 avg 1ms、跳帧 0；5 路并发合计 147 fps、丢帧 0。
-
-但两类需求 v1 的语义从根上不对：
-
-- **连续采样流**（EEG/EMG/生理信号、音频 PCM、高频遥测）：丢一个 block 会让之后的样本序号、`sample_start`、trigger/marker 对齐、ERP 叠加整体错位，而波形看着正常、不会报错。默认 4 槽 @1000 Hz 只有 **4ms** 容错窗口。
-- **需要完整历史 / 可复现 / 可审计**的场景（录制、训练集、故障回放）：`dropped` 只是事后统计，补不回数据。
-
-另外 v1 的生产就绪欠账（弱内存序屏障、写者存活信号、close 后读写、真实段大小校验、并发压测证据）也需要在演进中一并处理。详见第 3、6 节。
-
----
-
-## 2. v1 基线（0.1.0，当前代码）
-
-| 项 | 实际行为 | 代码 / 文档位置 |
+| 角色 | 谁用 | 对写者的影响 |
 | --- | --- | --- |
-| 全局头 | 64 B，`<IHHHHIqqqiiii8x`：`magic/version/header_size/endian/flags/capacity/seq/frame_id/stamp/slot_count/slot_size/meta_capacity/payload_offset/8B reserved` | `PROTOCOL.md:34-63`、`shmring/_protocol.py:19` |
-| 槽头 | 32 B，`<qqiiIi`：`frame_id/stamp/length/meta_len/checksum/flags`；`checksum` v1 写 0、读者不校验 | `PROTOCOL.md:83-92` |
-| 槽定位 | `base = 64 + (frame_id % slot_count) * slot_size`，**按帧号取模无条件覆盖，从不读取者进度** | `shmring/writer.py:134`、`PROTOCOL.md:72` |
-| 发布 | 三步：写奇数 `seq` 宣告写入中 → 载荷 → meta → **最后**写槽头 → 写偶数 `seq` + 新 `frame_id` 一次性提交 | `shmring/writer.py:137-148`、`PROTOCOL.md:103-116` |
-| 单帧读 | 双检 seqlock（`seq1 == seq2` 且偶数且 `frame_id` 未变），复制出独立 Buffer | `PROTOCOL.md:120-127` |
-| 批量读 | `first = max(cursor+1, newest - slot_count + 1)`；批量期间 seqlock 变化则**整批丢弃且 `dropped = 0`** | `shmring/reader.py:100,107-109` |
-| 丢帧报告 | `dropped = max(0, newest - cursor - len(frames))`，纯事后统计 | `shmring/reader.py:112` |
-| 默认值 | `capacity = 8 MiB`、`slot_count = 4`、`meta_capacity = 256` → 约 2 MiB/帧 | `shmring/_protocol.py:14-16` |
-| 拓扑 | 单写者 + N 读者；读者各有**进程内**游标 `self._last` | `PROTOCOL.md:11`、`shmring/reader.py` |
-| 内存序 | 无屏障，仅依赖 x86/x64 的 8 字节对齐原子性；ARM 弱序不保证 | `PROTOCOL.md:16` |
-| 时钟 | `stamp` 为 Unix 毫秒，**仅诊断，不参与正确性判断**（允许回拨） | `PROTOCOL.md:17` |
-| 读端拷贝 | 必须复制出独立 Buffer；**不是零拷贝** | `PROTOCOL.md:136` |
+| `observer`（默认，旁路读者） | 预览、推理、仪表 | 没有。落后超过 `slot_count` 时，这一路得到 `Gap`，写者无感 |
+| `retainer`（占槽读者） | 明确要求「我没提交的帧先别覆盖」的那一路 | **只在 `return` 下生效**。它没提交、且心跳未过期时，写者不再覆盖它还占着的槽，把新帧交还调用方 |
 
-**语义原文**（`PROTOCOL.md:13`、`:150`）：「最近 N 帧的历史窗口，不是队列」「读者落后超过 `slot_count` 帧必然丢帧（设计取舍：宁丢旧帧，不堆积延迟）」。
+默认没有占槽读者。此时 `return` 和 `overwrite` 一样，每次 `publish()` 都把新帧写入环。
 
-> 所以「5 路 benchmark 丢帧 0」是 **30 fps 限速 + 2 ms 扫描 + 4 槽**下的稳态观测，证明视频节奏够用，**不是不丢帧的保证**。
+占槽读者是显式登记的。显示线程不要登记成占槽读者。一个段最多一个占槽读者；多出来的 `attach` 直接失败。
 
-### v1 已知限制（`PROTOCOL.md:145-151`）
+`return` 且占槽读者没跟上时，交还的那一帧**不在环里**，旁路读者也看不到。写者线程不会停在 `publish()` 里。调用方丢掉它、或自己另存，都发生在 `publish()` 返回之后。
 
-1. 单写者，多写者需外部仲裁；
-2. 弱内存序 CPU 未验证；
-3. 段 ≤ 4 GiB（`capacity` 为 u32）；
-4. 落后超过 `slot_count` 帧必然丢帧；
-5. `stamp` 只用于诊断。
+占槽读者心跳超过 `stale_ms` 就视为不在了：它不再把环占满，之后的 `publish()` 可以覆盖它没提交的帧。死读者不能把环钉死。它若还醒着，下一次 `read()` 得到 `Gap`。处理一帧的时间可能超过 `stale_ms` 时，处理循环里要调用 `heartbeat()`，或把 `stale_ms` 设大。
 
----
-
-## 3. v1 收尾（0.2.0，不动协议）
-
-这一档修的是**长稳与安全性**，**不**把语义改成队列。它们与 v2 独立，可以先行发布。
-
-### P0 — 阻塞上线
-
-| # | 问题 | 改动 |
-| --- | --- | --- |
-| 1 | 跨进程无 release/acquire 屏障，ARM 上可能双检通过却拿到上一帧 | v1 明确限定 x86_64 小端并在 attach 时拒绝其他平台；屏障留到 v2 |
-| 2 | Node 把头里的 `capacity` 当真实映射大小，头损坏可越界 `memcpy` 崩主进程 | attach 时取 OS 真实段大小（`VirtualQuery` / `fstat`）比对，Python `_read_slot` 包越界异常 |
-| 3 | `close()` 后仍可读写（use-after-unmap） | 平台层 + ring 层加状态位，读写前检查并抛 typed error |
-| 4 | 启动竞态甩给调用方（showcase 自己写了 15 s 重试） | 库内 `attach_timeout` + 退避，区分「段不存在」与「头未就绪」 |
-| 5 | 写者崩溃无存活信号，读者一直读到同一帧 | reserved 8 B 放 `writer_epoch` + `heartbeat`（可不动 `VERSION`，走 flags 位） |
-| 6 | 缺并发撕裂压测 / soak / 故障注入 / 多 reader 并发，CI 矩阵单薄 | 补测试 + 三平台多版本 CI 门禁 |
-
-### P1 — 上线前应该有
-
-- 批量作废会饥饿且静默：逐槽校验 + 按已确认槽推进，或返回明确 `retry`（修 `reader.py:107-109`）；
-- 单写者无 fencing：头里放 `writer_pid + epoch`，第二个写者拒绝接管；两端 `replace` 行为对齐；
-- 默认开 CRC32（槽头已预留 `checksum`）；
-- Python reader 改只读映射（POSIX 当前 `O_RDWR` 能写坏段）；
-- 补 `wait(timeout)` / 事件通知，或在文档明确轮询责任与 CPU 成本；
-- 段名命名空间（Windows 会话级、POSIX `/dev/shm` 64 MB、macOS 31 B）文档 + 随机名生成器 + ACL 建议。
-
----
-
-## 4. v2 目标与不变量
-
-**目标**：同机、跨语言、**无损**的帧/块传输；保留 v1 的低延迟与「一路一段」隔离能力。
-
-不变量：
-
-1. 任何已 `publish()` 且**未被所有 reader 确认**的帧，不得被覆盖；
-2. 槽满时写者必须阻塞、落盘或显式报错，不允许静默覆盖；
-3. 1 写者 + N 读者，读者进度是**共享状态**，不是进程内变量；
-4. 每次读到的帧序号严格连续，缺口必须显式报错而非静默；
-5. 写者崩溃 / 重启可检测，可恢复或明确失败；
-6. acquire/release 原子，x86 与 ARM 都正确；
-7. 交付语义写进文档：建议「至少一次 + 幂等去重」，不假装能做到恰好一次。
-
----
-
-## 5. 机制差异
+## 3. 拓扑
 
 ```
-v1  覆盖式窗口（写者单向）
-    写者 ──写槽(fid % N)──> [s0 s1 s2 s3] ──读──> 读者
-    写者从不读取者进度；读者落后 > N 帧 ⇒ 旧帧已被覆盖 ⇒ dropped++
+overwrite（默认）
+    写者 ──始终写入 W % N──> [s0 s1 s2 s3] ──各读各的──> 旁路读者
+    写者不看 read_pos
+    某路落后超过 N 帧 ⇒ 只有这一路得到 Gap
 
-v2  双游标无损队列（读者回写）
-    写者 --检查 W-min(R) < N--> [s0 s1 s2 s3] --读--> 读者
-              ▲                                    │
-              └────── release-store read_pos ──────┘
-    槽满 ⇒ 背压阻塞 / spill 落盘 / 抛错；不覆盖任何未确认帧
+return，且存在活着的占槽读者
+    写者 ── W - read_pos < N ? ──> 是：写入并发布
+                                 └─ 否：立刻 accepted=false，环的字节不变
+    旁路读者的 read_pos 不参与这次判断
 ```
 
-`W = write_pos`（下一个可写序号），`R_i = read_pos[i]`（第 i 个读者下一个待读序号）。
-可覆盖条件：`W - min(R_i) < slot_count`。
+`W = write_pos`，下一个要写的序号，也等于已发布帧数。`read_pos[i]` 是该读者下一个待读序号。可覆盖（或可写入）的条件只在 `return` 里检查，且只看活着的占槽读者：`W - read_pos < slot_count`。没有活着的占槽读者时，这个条件视为成立。
 
----
+## 4. 全局头（1024 字节）
 
-## 6. v1 → v2 逐项改动清单（本文核心）
+前 16 字节和 v1 相同，用来认出版本然后拒绝混接。`magic` 仍是 `0x524D4853`。
 
-| # | 项 | v1 现状 | v2 改动 |
-| --- | --- | --- | --- |
-| 1 | 覆盖策略 | `writer.py:134` `fid % slot_count` 无条件覆盖 | 写前校验 `W - min(R) < slot_count`；不满足则走 `overflow_policy` |
-| 2 | 读者进度 | 仅进程内 `self._last`（`reader.py:111`） | 共享 `read_pos[MAX_READERS]`；读完 `release-store` 回写 |
-| 3 | 全局头 | 64 B，`seq/frame_id/stamp` + 几何 | 扩到 ≥ 128 B（建议 1024 B 以便缓存行对齐），新增 `write_pos/read_pos[]/writer_pid/writer_epoch/heartbeat/overflow_policy/max_readers/checksum_algo` |
-| 4 | 发布提交 | 奇偶 `seq` seqlock（`writer.py:138-148`） | 改为 `release-store(write_pos, W+1)`；槽内保留 `slot_seq` 供读者校验，seqlock 可退化为单槽防撕裂 |
-| 5 | 内存序 | 无屏障，x86 碰巧成立（`PROTOCOL.md:16`） | `acquire_load` / `release_store`；Win 用 `InterlockedCompareExchange64`，POSIX 用 `libatomic` / `__atomic`（ctypes 调用） |
-| 6 | 槽满 | 静默覆盖，`dropped` 事后统计 | `overflow_policy = block / spill / error`；block 时条件等待，spill 时写盘并把槽标记为「已溢出，读端从盘取」 |
-| 7 | 批量作废 | `reader.py:107-109` 整批丢弃且 `dropped=0` | 逐槽独立校验，按已确认槽推进游标；返回明确 `retry`，禁止静默空批 |
-| 8 | 完整性 | `checksum` 写 0、读者不校验（`PROTOCOL.md:91`） | 默认 CRC32，失败抛 `ChecksumError` 并触发重同步 |
-| 9 | 帧标识 | 全局头 `frame_id` + 槽头 `frame_id` | payload 内自带 `block_seq + sample_start + n_samples + rate + CRC32`；读端三重校验 `block_seq == expected`、`sample_start == expected_sample`、`crc_ok` |
-| 10 | 存活检测 | 无 | `writer_pid` + `writer_epoch` + `heartbeat_ms`；读者按心跳判离线，epoch 变化触发重同步 |
-| 11 | 单写者 fencing | 无（P1） | 头里 `writer_pid/epoch`，第二个写者拒绝接管；`replace` 需显式 `force` |
-| 12 | 交付语义 | 无定义 | 明确「至少一次 + 幂等」：先处理/落盘 + 按序号去重 + 再提交 `read_pos` |
-| 13 | 多读者 | N 个独立 cursor，覆盖是全局的 | `read_pos[8]`，写者取 `min()`；慢消费者会拖住全部 → 建议单 reader（存盘进程）再扇出给显示/算法 |
-| 14 | 平台原子 | Python 无原生原子 | `ctypes` 调 `Interlocked*` / `libatomic`；这是 v2 主要工程成本，Node 侧可用 `Atomics` + `SharedArrayBuffer` 或同样走 FFI |
-| 15 | API | `publish/read/read_batch/close/unlink` | 新增 `wait(timeout)`、`stats()`、`attach_timeout`；`publish`/`read` 签名尽量不变，新增 `ShmRingWriterV2` / `protocol=2` 入口 |
-| 16 | 错误类型 | `ProtocolError/CapacityError` 等 | 新增 `BackpressureError/ChecksumError/WriterGoneError/SequenceGapError` |
-| 17 | 协议版本 | `VERSION = 1`，`header_size = 64` | `VERSION = 2`，`header_size` 变更，`magic` 不变；遇到不支持的 version 明确报错、拒绝混连 |
-| 18 | 测试 | 单进程串行读写 + 手工篡改头 | 并发撕裂压测、soak、写者崩溃恢复、损坏输入 OOB、多 reader、慢消费者背压、跨语言双向对拍、三平台 CI |
+`write_pos` 单独占一条缓存行。写者心跳另占一条。每个读者槽独占 64 字节。8 个读者从偏移 192 排到 704，其余填 0 到 1024。
 
-> **id 的正确角色**：`block_seq` / `sample_start` 只用于**校验连续性、去重、重同步锚点**。
-> 数据一旦被覆盖，内存里就没有了；除非落盘日志里还有，否则 id 补不回任何样本。
-> 只加 id 的净效果是「能更早更准地发现丢」，**一点也不减少丢**。
-
----
-
-## 7. v2 全局头草案（未定稿）
-
-`magic` 与「前 16 字节布局前缀」保持不变，便于读者先识别版本再选解析器。
+### 4.1 缓存行 0（偏移 0，创建后不变）
 
 | 偏移 | 类型 | 字段 | 说明 |
 | --- | --- | --- | --- |
-| 0 | u32 | `magic` | `0x524D4853`，**不变** |
-| 4 | u16 | `version` | **`2`** |
-| 6 | u16 | `header_size` | 建议 `1024`（给 `read_pos[]` 留缓存行空间） |
-| 8 | u16 | `endian` | `0x0102`，不变 |
-| 10 | u16 | `flags` | bit0 checksum / bit1 spill / bit2 has_heartbeat |
+| 0 | u32 | `magic` | `0x524D4853` |
+| 4 | u16 | `version` | `2` |
+| 6 | u16 | `header_size` | `1024` |
+| 8 | u16 | `endian` | `0x0102` |
+| 10 | u16 | `flags` | 写 `0` |
 | 12 | u32 | `capacity` | 段总字节数 |
-| 16 | i64 | `write_pos` | 下一个可写序号（= 已发布帧数） |
-| 24 | i64 | `writer_pid` | 创建者 PID |
-| 32 | i64 | `writer_epoch` | 每次 create 单调递增 / 随机，用于识别重启 |
-| 40 | i64 | `heartbeat_ms` | 写者最后活跃 Unix ms |
-| 48 | u32 | `slot_count` | 槽数 |
-| 52 | u32 | `slot_size` | 每槽字节数 |
-| 56 | u32 | `meta_capacity` | meta 区字节数 |
-| 60 | u32 | `payload_offset` | `32 + meta_capacity` |
-| 64 | u32 | `max_readers` | 建议 `8`（上限，非动态） |
-| 68 | u32 | `overflow_policy` | `0=block, 1=spill, 2=error` |
-| 72 | u32 | `checksum_algo` | `0=none, 1=crc32` |
-| 76 | u32 | `reserved0` | 写 0 |
-| 128… | i64 × 8 | `read_pos[0..7]` | **每个 reader 独占一个 64 B 缓存行**，避免伪共享；未使用的槽写 `-1` |
+| 16 | u32 | `slot_count` | 槽数，≥ 1 |
+| 20 | u32 | `slot_size` | 每槽字节数 |
+| 24 | u32 | `meta_capacity` | meta 区字节数 |
+| 28 | u32 | `payload_offset` | `64 + meta_capacity` |
+| 32 | u32 | `max_readers` | `8` |
+| 36 | u32 | `overflow_policy` | `0=overwrite`，`1=return` |
+| 40 | u32 | `checksum_algo` | `0=none`，`1=crc32` |
+| 44 | u32 | `stale_ms` | 心跳过期阈值。`return` 时 ≥ 1，默认 `1000` |
+| 48 | i64 | `writer_epoch` | 本次 create 的随机值 |
+| 56 | i64 | `writer_pid` | 创建者 PID，只供诊断 |
 
-槽布局沿用「32 B 槽头 + meta + payload」，但槽头 `frame_id` 语义改为 `slot_seq`（== 写入时的 `W`），并启用 `checksum`。
-`payload` / `meta` 仍是不透明字节，库不解析编码。
+### 4.2 缓存行 1（偏移 64，发布热行）
 
----
+| 偏移 | 类型 | 字段 | 说明 |
+| --- | --- | --- | --- |
+| 64 | i64 | `write_pos` | 下一个可写序号。release 发布 |
+| 72 | — | reserved | 写 `0`。心跳不要放在这一行 |
 
-## 8. 写 / 读伪代码
+### 4.3 缓存行 2（偏移 128）
 
-```python
-def publish(self, payload, meta=b"") -> int:
-    W = self.W                                   # 写者本地序号
-    while True:
-        rp = min(acquire_load(self.hdr.read_pos[i])
-                 for i in active_readers(self.hdr))   # 最慢的读者
-        if W - rp < self.slot_count:
-            break                                    # 有空位
-        self.backpressure()                          # block / spill / raise
+| 偏移 | 类型 | 字段 | 说明 |
+| --- | --- | --- | --- |
+| 128 | i64 | `writer_heartbeat_ns` | 单调时钟纳秒，不是 Unix 毫秒。占 128–135 |
+| 136 | i32 | `retainer_slot` | 当前占槽读者的槽号，没有时为 `-1`。`attach(role=retainer)` 用 CAS 从 `-1` 认领 |
 
-    base = HEADER_SIZE + (W % self.slot_count) * self.slot_size
-    write_payload(base, payload)                     # 1) 先载荷
-    write_meta(base, meta)                           # 2) 再 meta
-    crc = crc32(payload) if self.checksum else 0
-    write_slot_header(base, slot_seq=W, crc=crc, length=len(payload))  # 3) 槽头最后
-    release_store(self.hdr.write_pos, W + 1)        # 4) 发布（release 保证前面写入可见）
-    self.W = W + 1
-    return W
+### 4.4 读者槽（偏移 `192 + i * 64`，i = 0..7）
 
+| 相对偏移 | 类型 | 字段 | 说明 |
+| --- | --- | --- | --- |
+| 0 | i64 | `read_pos` | 下一个待读序号。空槽为 `-1` |
+| 8 | i64 | `heartbeat_ns` | 单调时钟纳秒 |
+| 16 | i64 | `generation` | 每次成功 `attach` 加 1 |
+| 24 | u32 | `role` | `0=observer`，`1=retainer` |
+| 28 | u32 | `state` | `0=empty`，`1=active`，`2=claiming`（认领中，失败会改回 empty） |
+| 32 | u32 | `pid` | 诊断 |
+| 36 | — | reserved | 填到 64 字节 |
 
-def read(self):
-    W = acquire_load(self.hdr.write_pos)
-    R = self.R
-    if R >= W:
-        return None                                  # 真·没有新数据
-    f = read_slot(R)
-    assert f.slot_seq == R and crc_ok(f), SequenceGapError
-    # 注意顺序：先处理/落盘（幂等），再提交游标
-    self.handle(f)                                   # 应用侧按序号去重
-    release_store(self.hdr.read_pos[self.id], R + 1)
-    self.R = R + 1
-    return f
+attach 校验：
+
+```
+magic == 0x524D4853
+version == 2
+header_size == 1024
+endian == 0x0102
+capacity >= 1024 + slot_count * slot_size
+slot_count >= 1
+max_readers == 8
+payload_offset == 64 + meta_capacity
+slot_size > payload_offset
+overflow_policy ∈ {0, 1}
+checksum_algo ∈ {0, 1}
+overflow_policy == 1 ⇒ stale_ms >= 1
 ```
 
-三个必须一起处理的坑：
+任一不满足即拒绝，按 v1 布局去猜。
 
-1. **恰好一次不存在**：先回写游标再处理 → 崩溃丢；处理完再回写 → 崩溃重复。EEG 落盘用「先写盘 + 按序号幂等去重 + 再提交游标」，对外承诺「至少一次」。
-2. **Python 没有原生原子**：`multiprocessing.shared_memory` 只是字节；必须 `ctypes` 调 `InterlockedCompareExchange64`(Win) / `__atomic`(GCC)，或跨进程命名互斥体。这同时把 v1 的 ARM 屏障欠账修掉。
-3. **多读者会互相拖累**：写者取 `min(read_pos)`，慢的存盘 reader 会挡住全部。建议单 reader 扇出，慢消费者走磁盘而不是共享内存。
+## 5. 槽
 
----
+槽 `W` 的起始偏移：`1024 + (W % slot_count) * slot_size`。
 
-## 9. 兼容性与迁移
+槽头 64 字节，占一条缓存行。payload 从 `payload_offset` 开始。
 
-- `magic` 与 `header_size` 的校验规则不变；`version` 只在**不兼容**变更时递增 → v2 用 `VERSION = 2`。
-- 读者遇到不支持的 `version` 必须**明确报错**，不得按旧布局静默解析（`PROTOCOL.md:142`）。
-- **禁止同名段混连**：v1 写者 + v2 读者（或反之）必须被 magic/version/header_size 校验挡住。建议段名带版本后缀，如 `xxx_v2`。
-- **双协议并存**：不要改 `ShmRingWriter` 的既有语义。新增 `ShmRingWriterV2` / `ShmRingReaderV2`（或 `protocol=2` 参数），v1 类保持「最新优先、可丢」不变。两个协议可以共存在一个包里，但不能共用一个段。
-- **API 兼容**：`publish()` / `read()` / `read_batch()` 签名尽量不动；`wait()`、`stats()`、`attach_timeout` 是新增能力。
-- **发版**：v1 收尾走 `0.2.0`；v2 协议升级建议走 `0.3.0` 或 `2.0.0`，PyPI / npm 双包同步。
+| 相对偏移 | 类型 | 字段 | 说明 |
+| --- | --- | --- | --- |
+| 0 | i64 | `seqlock` | 奇数 = 这一槽正在被覆盖；偶数 = 稳定 |
+| 8 | i64 | `slot_seq` | 这一槽里的帧序号；空槽 `-1` |
+| 16 | i64 | `stamp` | Unix 毫秒，只用于诊断，允许回拨 |
+| 24 | u32 | `length` | payload 字节数 |
+| 28 | u32 | `meta_len` | meta 有效字节数 |
+| 32 | u32 | `checksum` | `checksum_algo=1` 时为 CRC32；否则写 `0` |
+| 36 | u32 | `flags` | 写 `0` |
+| 40 | — | reserved | 填到 64 字节 |
 
----
+CRC32 覆盖 `meta_len` 字节的 meta，再接 `length` 字节的 payload（zlib / IEEE）。不算 meta 区里没用到的填充。
 
-## 10. 落地顺序与验收
+`payload` 和 `meta` 仍是不透明字节。连续性只看槽头的 `slot_seq`。库不解析采样率、样本起点或业务序号。
 
-| 阶段 | 内容 | 验收标准 |
+覆盖和 v1 一样会碰到「读者正在拷贝的那一槽」。用**这一槽自己的 seqlock**，不用全局 seqlock：写者动一个槽时，正在拷贝其他槽的读者不受影响。
+
+奇数那次写入必须是全屏障（Windows `InterlockedExchange64`，POSIX `__ATOMIC_SEQ_CST`）。release 存储挡不住后面的 payload 写跑到奇数标记前面，不能用来把槽标成「写入中」。
+
+## 6. 写
+
+同一进程里多个线程调用 `publish()` 时，用进程内的锁串行。这把锁读者不拿，也不拿它去等任何人。一个段仍然只有一个写进程。段已存在时，第二个写者直接失败。重建段用 `unlink` 后再 create，或显式 `replace`（原地重置并更换 `writer_epoch`）。
+
+```text
+publish(payload, meta, stamp) -> PublishResult:
+    超长 ⇒ CapacityError，不改环
+
+    if overflow_policy == return and 存在活着的占槽读者
+           and W - read_pos >= slot_count:
+        return PublishResult(accepted=false, frame_id=None)
+        # 不碰 seqlock，不碰 write_pos，不拷贝 payload
+
+    base = 1024 + (W % slot_count) * slot_size
+    seq_cst_store(seqlock, seqlock + 1)     # 变成奇数
+    写 payload、meta
+    写槽头：slot_seq=W, length, meta_len, stamp, checksum
+    seq_cst_store(seqlock, seqlock + 1)     # 变成偶数
+    release_store(write_pos, W + 1)
+    W = W + 1
+    return PublishResult(accepted=true, frame_id=W - 1)
+```
+
+「活着」指：`state==active`、`role==retainer`、`now - heartbeat_ns < stale_ms`。时钟是本机单调钟（Windows `QueryPerformanceCounter`，POSIX `CLOCK_MONOTONIC`）。不要用 Unix 毫秒做心跳。
+
+`publish()` 的开头更新 `writer_heartbeat_ns`。两帧之间长时间空闲时调用 `heartbeat()`，避免读者把活着的写者看成已退出。
+
+## 7. 读和提交
+
+`read()` 不推进 `read_pos`。调用方处理完（旁路读者是显示，占槽读者是自己的落盘）再 `commit(seq)`。崩溃发生在提交前就再读一次；那一帧若已被覆盖，得到 `Gap`，而不是静默缺帧。
+
+```text
+read():
+    刷新自己的 heartbeat_ns
+    W = acquire_load(write_pos)
+    R = 本地已提交游标          # 等于自己的 read_pos
+    if R >= W:
+        return None             # 没有新帧
+    if W - R > slot_count:
+        return Gap(dropped=W - slot_count - R, next_seq=W - slot_count)
+
+    s1 = acquire_load(seqlock)
+    if s1 为奇数 or slot_seq != R:
+        重试若干次；仍然对不上 ⇒ 按上面的公式再判一次 Gap 或 None
+    拷贝 payload 和 meta 到独立缓冲区
+    s2 = acquire_load(seqlock)
+    if s1 != s2:
+        重试
+    if checksum_algo==1 and crc 不符:
+        raise ChecksumError     # 不提交，不跳到更新的序号
+    return Frame(seq=R, stamp, payload, meta)
+
+
+commit(seq):
+    # seq 必须等于当前 read_pos，即刚刚 read() 到的那一帧
+    release_store(read_pos, seq + 1)
+
+skip_to(seq):
+    # 只用于明确接受 Gap。seq 等于 Gap.next_seq，且 seq > read_pos
+    release_store(read_pos, seq)
+```
+
+`read_batch()` 从当前游标起连续窥视。槽是稳定的就放进批次；遇到 `Gap` 或 `None` 就停。写者在此期间继续发布**不会**把已经窥视成功的帧作废，也不把整批丢掉。调用方对最后一帧 `commit`，或对 `Gap.next_seq` 执行 `skip_to`。
+
+`ChecksumError` 表示这一槽损坏或实现错误。库不把游标拨到最新帧。
+
+读者加入时默认站在当前 `write_pos`（`join=tip`），不承担历史。`join=window` 站到 `max(0, write_pos - slot_count)`，只读环里还在的那些帧。不允许把 `read_pos` 设到比窗口更老的位置；那样一个新的占槽读者会让 `return` 立刻开始交还。
+
+`close()` 把本槽 `state` 写成 `empty`，`read_pos` 写成 `-1`。崩溃的读者不会自动让出槽位，8 个槽会漏到段销毁为止。它的心跳过期后不再参与 `return` 的占槽判断，因此漏掉的槽**不会**卡住写者。
+
+## 8. 和其他路的关系
+
+| 事件 | 写者 | 其他读者 | 这一路 |
+| --- | --- | --- | --- |
+| 旁路读者变慢 | 继续 `publish`，耗时不变 | 继续读到自己窗口里的帧 | `read()` 返回 `Gap`，要 `skip_to` 才继续 |
+| 占槽读者变慢，策略是 `overwrite` | 继续写入 | 同上 | 同上。占槽身份在 `overwrite` 下不保护帧 |
+| 占槽读者变慢但仍有心跳，策略是 `return` | 立刻 `accepted=false`，环不变 | 看不到被交还的新帧；已在环里的帧还在 | 提交之后，写者才恢复写入 |
+| 占槽读者心跳过期 | 恢复写入，可以覆盖它没提交的帧 | 不受影响 | 若还活着，得到 `Gap` |
+| 写者心跳过期 | — | 已在环里的帧仍可按 seqlock 读完；`writer_alive` 为假。不阻塞 | 同左 |
+
+## 9. API
+
+v1 的 `ShmRingWriter` / `ShmRingReader` 不改。v2 新类：
+
+```text
+ShmRingWriterV2(name, capacity, slot_count, meta_capacity,
+                overflow="overwrite", stale_ms=1000, replace=False)
+    publish(payload, meta=b"", stamp=None) -> PublishResult
+    heartbeat()
+    close() / unlink()
+
+PublishResult
+    accepted: bool
+    frame_id: int | None
+
+ShmRingReaderV2(name, role="observer", join="tip")
+    read() -> Frame | Gap | None
+    read_batch(limit=None) -> Batch
+    commit(seq)
+    skip_to(seq)
+    heartbeat()
+    writer_alive -> bool
+    close()
+
+Frame(seq, stamp, payload, meta)
+Gap(dropped, next_seq)
+Batch(frames, gap | None)
+```
+
+两端都提供。错误类型在 v1 之上增加 `ChecksumError`。环满且策略为 `return` 时不抛异常，用 `accepted=false` 表示。
+
+原子操作用 FFI，不用 `SharedArrayBuffer`。Python 创建的命名段不是 Node 的 SAB，`Atomics` 碰不到它。
+
+| 平台 | 写 `write_pos` / `read_pos` | 槽 seqlock 的奇偶翻转 |
 | --- | --- | --- |
-| 0 | 把当前提交推 GitHub，确认三平台 CI 全绿（POSIX 后端首次真跑） | Actions 三平台 + benchmark 冒烟 + 5 段跨语言校验全绿 |
-| 1 | **0.2.0**：第 3 节 P0/P1 实现修复，不动协议 | close 后读写抛错、真实段大小校验、库内 attach 重试、CRC32、并发压测 0 撕裂 |
-| 2 | **v2 原型**：新类 + 双游标 + 背压 + CRC + 原子，先只支持 x86_64 单 reader | 并发写读压测 **0 丢**；写者崩溃后 epoch 变化可检测；慢 reader 背压生效；跨语言双向对拍 |
-| 3 | **v2 完整**：多 reader、spill、ARM 屏障、soak、故障注入 | ARM CI 绿、24 h soak、崩溃恢复、损坏输入不崩、文档与 `PROTOCOL.md` v2 章节同步 |
+| Windows | `InterlockedExchange64` | 同左（全屏障） |
+| POSIX | `__atomic_store_n(..., __ATOMIC_RELEASE)` | `__atomic_store_n(..., __ATOMIC_SEQ_CST)` |
 
----
+读侧用 acquire load。Node 经 `koffi` 调同一组函数。
 
-## 11. 什么时候不该用 v2
+## 10. 验收
 
-- **实时显示 / 频谱 / 在线推理**：v1 + 20–100 ms block 聚合 + 序号/CRC 校验就够，v2 的背压反而会把采集端拖慢、把延迟堆积起来。
-- **科研级 EEG 记录**：直接用 **LSL (Lab Streaming Layer)**——自带采样时钟同步、无损传输、跨语言 API 与录制工具。v2 只解决「同机无损传输」，不提供设备时钟同步、EDF+/HDF5 落盘或实验标记系统。
-- **跨机器 / 持久化 / 多写者**：都不在本库范围内，用 ZeroMQ / Kafka / 消息队列 + 数据库。
+- 旁路读者睡数秒：`publish()` 耗时不变；跟得上的其他读者帧序号连续；睡着的那路醒来得到一次 `Gap`，`dropped` 等于被覆盖的帧数。
+- `return`，占槽读者停止 `commit` 但继续心跳：`publish()` 马上返回 `accepted=false`，环里对应槽的字节不变，调用线程不堵在库内。
+- 同上，心跳超过 `stale_ms`：随后的 `publish()` 重新 `accepted=true`。
+- 没有占槽读者：`return` 也每次都写入。
+- 拷贝过程中该槽被覆盖：返回的不是半新半旧的 payload；读者得到完整旧帧，或得到 `Gap` / 重试。
+- CRC 不符：抛 `ChecksumError`，`read_pos` 不变。
+- v1 单测与跨语言对拍保持原样通过。v2 另做 Python ↔ Node 对拍。
 
-一句话：v1 擅长「现在这一帧」，v2 擅长「一帧都不少」，两者都**不**擅长「跨机器可靠投递」。
+## 11. 不做
 
----
+- 在 `publish()` 里睡眠、等事件、等最慢读者。
+- 库内 spill 文件、落盘格式、回放 API。
+- 解析 payload 里的 `block_seq` / `sample_start`。
+- 校验失败后把游标跳到最新帧。
+- 多写者。
+- 崩溃读者的槽位自动抢占。v2 只忽略其过期心跳。
+- 用 Unix 毫秒判断死活。
+- 改 v1 段的布局或「最新优先、可丢」语义。
 
-## 12. 未决问题
+## 12. 相对 v1
 
-1. `read_pos[]` 固定 8 个槽够不够？reader 崩溃后其槽位如何回收（epoch + 心跳超时自动释放）？
-2. `overflow_policy=spill` 的落盘格式与回放 API 由库提供，还是交给应用？
-3. `writer_epoch` 如何跨进程持久化（段内自增即可，但进程重启后需保证不回退）？
-4. Node 侧原子用 `Atomics` + `SharedArrayBuffer` 还是继续走 koffi FFI？两者在 Electron 内置 Node 下的可用性需实测。
-5. v2 是否仍承诺「读端必须复制出独立 Buffer」？无损队列 + 大 block 下这份拷贝是否会成为新瓶颈，需要基准数据再定。
+| 项 | v1 | v2 |
+| --- | --- | --- |
+| 写者 | 无条件覆盖，全局 seqlock | 仍默认无条件覆盖；提交点改为 `write_pos` 的 release；防撕裂改为槽内 seqlock |
+| 读者进度 | 进程内 `last_frame_id` | 共享 `read_pos`，只服务这一路的缺口、提交和 `return` 占槽判断 |
+| 落后 | `dropped` 计数，批量期间 seqlock 变化会把整批丢掉且 `dropped=0` | 这一路得到 `Gap`；其他槽上已读出的帧保留 |
+| 环满 | 不存在「满」，永远覆盖 | `overwrite` 仍永远覆盖；`return` 立刻交还，不阻塞 |
+| 完整性 | `checksum` 写 0 | 可选 CRC32，失败即停在这一帧 |
+| 版本 | `1`，头 64 B | `2`，头 1024 B。magic 相同，version 不同即拒绝 |
 
----
-
-相关文档：[README.md](README.md)（定位、适用场景与不适用）、[PROTOCOL.md](PROTOCOL.md)（v1 权威格式）、[CHANGELOG.md](CHANGELOG.md)（版本记录）。
+v1 代码位置：覆盖写在 `shmring/writer.py` 的 `publish()`，批量丢弃在 `shmring/reader.py` 的 `read_batch()`。

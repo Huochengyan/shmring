@@ -5,14 +5,24 @@ The wire format is versioned independently in [PROTOCOL.md](PROTOCOL.md).
 
 ## Unreleased
 
-- Added [`V2_DESIGN.md`](V2_DESIGN.md): a design-only document (no code) that
-  records the v1 0.1.0 baseline with exact code/protocol references, the v1
-  cleanup list for 0.2.0 (no wire change), and the full v1 -> v2 change table
-  for a lossless queue: shared `write_pos`/`read_pos[]` cursors, reader
-  write-back, backpressure/spill on full, acquire/release atomics, CRC32,
-  block sequence numbers, writer liveness, delivery semantics, header draft,
-  pseudocode, compatibility rules and acceptance criteria. Linked from
-  `README.md` (roadmap + protocol section); included in npm/sdist manifests.
+## 0.2.0 (2026-11-24)
+
+- Implemented v2 in Python (`ShmRingWriterV2` / `ShmRingReaderV2`) and Node.
+  `publish()` never waits: `overwrite` stores the frame, `return` hands it back
+  when a live retainer still holds the slot. Observers do not affect the writer.
+  Header is 1024 bytes; offset 136 is `retainer_slot` (`-1` when none).
+  The five-camera example uses v2. `--real-camera` puts a real camera on lane 0
+  and falls back to a synthetic PNG when ffmpeg or a device is missing.
+  `scripts/verify_multi.py` stays on synthetic frames. `scripts/interop_v2.js`
+  checks Python and Node against each other.
+- Revised [`V2_DESIGN.md`](V2_DESIGN.md). v2 does not
+  block the writer on a slow reader and does not spill inside the library.
+  `publish()` returns immediately: `overwrite` stores the new frame and a
+  lagging reader observes a gap on its own cursor; `return` hands that frame
+  back to the caller when a live retainer still occupies the slot. Observers
+  never affect the writer. Header is 1024 bytes with `write_pos` on its own
+  cache line, per-slot seqlock, optional CRC32, and monotonic heartbeats.
+  Linked from `README.md`; included in npm/sdist manifests.
 - Added `.github/workflows/publish.yml` for Trusted Publishing (OIDC) from
   GitHub Actions starting with 0.1.1: `v*` tag triggers, `id-token: write`,
   no token or secret in the repo, automatic provenance. Deliberately omits

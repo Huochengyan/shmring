@@ -27,15 +27,26 @@ from ._protocol import (
     SLOT_HEADER_SIZE,
     VERSION as PROTOCOL_VERSION,
 )
-from .errors import CapacityError, ProtocolError, SegmentNotFound, ShmRingError
+from .errors import CapacityError, ChecksumError, ProtocolError, SegmentNotFound, ShmRingError
 from .reader import Batch, Frame, ShmRingReader
+from .v2 import (
+    BatchV2,
+    FrameV2,
+    Gap,
+    PublishResult,
+    ShmRingReaderV2,
+    ShmRingWriterV2,
+    WriterInfoV2,
+)
 from .writer import ShmRingWriter, WriterInfo
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "ShmRingWriter", "ShmRingReader", "Frame", "Batch", "WriterInfo",
-    "ShmRingError", "ProtocolError", "SegmentNotFound", "CapacityError",
+    "ShmRingWriterV2", "ShmRingReaderV2", "FrameV2", "Gap", "BatchV2",
+    "PublishResult", "WriterInfoV2",
+    "ShmRingError", "ProtocolError", "SegmentNotFound", "CapacityError", "ChecksumError",
     "normalize_name", "unlink",
     "MAGIC", "PROTOCOL_VERSION", "HEADER_SIZE", "SLOT_HEADER_SIZE",
     "DEFAULT_CAPACITY", "DEFAULT_SLOT_COUNT", "DEFAULT_META_CAPACITY",

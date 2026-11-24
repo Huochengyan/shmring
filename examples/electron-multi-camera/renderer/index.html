@@ -3,20 +3,32 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>shmring · 5 路并发共享内存 showcase</title>
+  <title>shmring · 视频与时序</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <div class="app">
     <header class="topbar">
       <div>
-        <h1>5 路并发 · 一路一段</h1>
-        <p class="subtitle">Python 单进程开 5 个 ShmRingWriter 写 5 个命名段，Electron 一个循环扫 5 个 reader</p>
+        <h1>视频与时序</h1>
+        <p class="subtitle">同一条 v2 共享内存：五路视频各写一段，时序是 160 导、512 Hz</p>
       </div>
-      <div class="badge">shmring v1 · 合成帧</div>
+      <div class="badge" id="badge">shmring v2 · overwrite</div>
     </header>
 
-    <main class="layout">
+    <div class="shell">
+      <nav class="menu" aria-label="功能菜单">
+        <button class="menu-item active" type="button" data-view="video">视频</button>
+        <button class="menu-item" type="button" data-view="series">时序数据</button>
+        <label class="scan-field">
+          <span>读取间隔</span>
+          <input id="scanInput" type="number" min="1" max="5000" step="1" value="2" />
+          <span>ms</span>
+        </label>
+      </nav>
+
+      <div class="content">
+        <main class="layout" id="view-video">
       <section class="stage">
         <div class="stage-head">
           <span id="liveDot" class="dot"></span>
@@ -64,8 +76,50 @@
           本示例展示的核心是「同一进程内多个 writer 实例各写各的段」，段名互不相同，
           帧号、seq、槽几何、线程锁全部实例隔离。
         </div>
-      </aside>
-    </main>
+        </aside>
+        </main>
+
+        <main class="layout" id="view-series" hidden>
+          <section class="stage">
+            <div class="stage-head">
+              <span id="seriesDot" class="dot"></span>
+              <span id="seriesStatus">正在等待时序数据…</span>
+              <span id="seriesLabel" class="frame-label">已收 0 个采样点</span>
+            </div>
+            <div class="chart-wrap">
+              <canvas id="seriesChart"></canvas>
+            </div>
+            <div class="stage-foot">
+              <span>160 导、512 Hz。一包的采样点数不固定。画面按像素抽点，环里是完整采样。</span>
+              <span id="seriesWindow">窗口 10 秒</span>
+            </div>
+          </section>
+          <aside class="side">
+            <div class="panel">
+              <h2>时序</h2>
+              <div class="metric"><span>采样率</span><strong id="seriesHz">512 Hz</strong></div>
+              <div class="metric"><span>导联</span><strong id="seriesChannels">160</strong></div>
+              <div class="metric"><span>最近一包</span><strong id="seriesPacket">-</strong></div>
+              <div class="metric"><span>吞吐</span><strong id="seriesRate">-</strong></div>
+              <div class="metric"><span>绘制</span><strong id="seriesDraw">-</strong></div>
+              <div class="metric"><span>包序号</span><strong id="seriesSeq">-</strong></div>
+              <div class="metric"><span>采样号</span><strong id="seriesIndex">-</strong></div>
+              <div class="metric"><span>丢包</span><strong id="seriesDropped">0</strong></div>
+              <div class="metric"><span>到达包速</span><strong id="seriesPps">-</strong></div>
+              <h2 class="window-title">显示窗口</h2>
+              <div class="window-picks" id="windowPicks">
+                <button type="button" data-seconds="4">4 秒</button>
+                <button type="button" data-seconds="10" class="active">10 秒</button>
+                <button type="button" data-seconds="20">20 秒</button>
+              </div>
+            </div>
+            <div class="note">
+              160 条曲线叠在一起，长度用上面的按钮切换。右侧的吞吐和丢包看的是共享内存里的完整数据，不是抽点之后的画面。
+            </div>
+          </aside>
+        </main>
+      </div>
+    </div>
   </div>
   <script src="renderer.js"></script>
 </body>
