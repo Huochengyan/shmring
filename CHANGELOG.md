@@ -5,6 +5,15 @@ The wire format is versioned independently in [PROTOCOL.md](PROTOCOL.md).
 
 ## Unreleased
 
+- Recorded a Windows run of `scripts/bench_multi.py` (v1, 40960-byte frames,
+  2026-11-24): paced case 21.2 fps for 1 lane and 106.7 fps for 5 lanes, 0
+  dropped; unlimited publish 245924 fps and 145448 fps (0.59×).
+- Aligned the README, `V2_DESIGN.md`, and the five-camera example with the
+  code. PyPI still serves 0.1.0. v2 CRC32 is on by default. v1 and v2 are both
+  single-writer. The example documents the 160-channel series lane and the
+  editable scan interval. v2 atomics are machine-code stubs, not
+  `InterlockedExchange64`.
+
 ## 0.2.0 (2026-11-24)
 
 - Implemented v2 in Python (`ShmRingWriterV2` / `ShmRingReaderV2`) and Node.

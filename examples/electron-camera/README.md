@@ -96,4 +96,4 @@ node node-shm-reader.js shmring_demo out.jpg
 
 肉眼感觉到的 100~200 ms 延迟几乎全部来自**摄像头曝光 + ISP + USB + dshow 驱动缓冲**，软件链路只有几毫秒。想再压低要从采集侧下手（补光、降分辨率、换低延迟摄像头），继续优化传输层没有意义。
 
-库自身的限制见仓库根 [README.md](../../README.md) 与 [PROTOCOL.md](../../PROTOCOL.md)：v1 单写者、x86/x64 内存序已验证（ARM 未验证）、读者落后超过 4 帧会计入 `dropped`、Linux/macOS 后端由 CI 覆盖但未在本机实测。
+库自身的限制见仓库根 [README.md](../../README.md) 与 [PROTOCOL.md](../../PROTOCOL.md)：这一示例用的是 v1，一段一个写者，x86/x64 内存序在 Windows 上验证过，ARM 未验证。读者落后超过 4 帧会计入 `dropped`。Linux/macOS 在 CI 矩阵里，最近的 run 没有通过，本机未实测。

@@ -1,11 +1,12 @@
 # shmring
 
-**跨语言、无锁的共享内存环形帧总线**：单写者、多读者，零 HTTP、零轮询请求、零互斥量。
+**跨语言共享内存环形帧总线**：单写者、多读者，零 HTTP、零轮询请求。跨进程用 seqlock，不拿互斥量。
 
 Python 写、Node/Electron 读（或反过来），两端直接映射同一块 OS 命名共享内存。`shmring` 把这条链路里最值得复用的部分——**内存布局 + seqlock + 环形覆盖 + 平台适配**——抽成了一个独立库，业务数据只是不透明字节。
 
-> 状态：`v0.2.0` 已发布到 **PyPI**（`pip install shmring`）；npm 首个版本待发布，
-> 当前 Node 侧请从源码使用 `npm install`（见下文）。协议见 [PROTOCOL.md](PROTOCOL.md)。
+> 状态：仓库是 `v0.2.0`（v1 与 v2）。PyPI 上仍是 `0.1.0`，`pip install shmring` 得到的是 v1。
+> 要用 0.2.0，在仓库根执行 `pip install -e .`。npm 尚未发布，Node 侧从源码 `npm install`。
+> v1 见 [PROTOCOL.md](PROTOCOL.md)，v2 见 [V2_DESIGN.md](V2_DESIGN.md)。
 
 ## 为什么需要它
 
@@ -22,7 +23,7 @@ Python 写、Node/Electron 读（或反过来），两端直接映射同一块 O
 | | |
 | --- | --- |
 | 传输 | OS 命名共享内存直连，无端口、无协议栈、无轮询请求 |
-| 同步 | 显式 seqlock，无互斥量 / 条件变量 / 系统调用 |
+| 同步 | 跨进程 seqlock，无条件变量。同一进程里 Python 的 `publish()` 用线程锁串行 |
 | 拓扑 | 单写者、多读者；读者各有独立游标 |
 | 语义 | 最近 N 帧的**窗口**，不是队列；宁丢旧帧，不堆积延迟 |
 | 载荷 | 不透明字节 + 可选 meta 字节，库不解析、不假定编码 |
@@ -59,7 +60,7 @@ Python 写、Node/Electron 读（或反过来），两端直接映射同一块 O
 高频连续流（EEG / EMG / IMU / 振动 / PCM / 日志事件）**只做实时显示、趋势或频谱**时可以借用本库，但库不提供完整性语义，必须自己补：
 
 - 按固定样本数聚成 **block**（如 500Hz × 64ch 聚成 20ms 一块 → 50fps），不要按单个样本 `publish()`；默认 4 槽在 1000Hz 下只有 4ms 容错窗口。
-- payload 自带 **block 序号 + 样本起始序号 + CRC32**；读端用 `readBatch()` 检查序号连续性，`dropped > 0` 立刻重同步，绝不静默插值。槽头的 `checksum` 在 v1 写 0、读者不校验。
+- payload 自带 **block 序号 + 样本起始序号**。v1 槽头 `checksum` 写 0、读者不校验。v2 默认对 meta 再 payload 做 CRC32，不符抛 `ChecksumError` 且不推进游标。读端仍要用自己的序号检查连续性，`dropped > 0` 立刻重同步。
 - `stamp` 是 Unix 毫秒且「仅用于诊断、允许时钟回拨」，不要当采样时基；时基要用自己的样本计数器。
 - `slot_count` 按可容忍的落后时间配（如 256 槽 @50fps ≈ 5s 窗口），别用默认 4。
 - **存盘必须独立做**：段是纯内存，进程退出即消失，不能当记录介质。
@@ -72,10 +73,10 @@ Python 写、Node/Electron 读（或反过来），两端直接映射同一块 O
 | 可靠投递：确认、重试、背压、消费位点 | ZeroMQ / Redis Streams / Kafka / NATS |
 | 任务队列、事件溯源、日志归档 | 同上 |
 | 大文件、批量数据搬运 | 文件 / mmap；默认几何下单帧上限约 2MB |
-| 多写者、严格全局顺序、事务 | v1 协议级禁止多写者（见下文「限制」） |
+| 多写者、严格全局顺序、事务 | v1 和 v2 都是一段一个写进程（见下文「限制」） |
 | 跨机器传输 | 本库只用 OS 命名共享内存，同机限定 |
-| ARM / 弱内存序平台 | v1 无内存屏障，仅限 x86/x64 小端 |
-| 无人值守长稳、崩溃恢复、写者存活检测 | v1 无 heartbeat / epoch，见下文「限制」与路线图 |
+| 把 v1 用在 ARM / 弱内存序上 | v1 无内存屏障。v2 写了全屏障，ARM 还没有单独验收 |
+| 崩溃后自动回收读者槽、把段当持久存储 | v2 有心跳，能看写者是否还活着；崩溃读者的槽位不会自动让出 |
 | 安全隔离 / 多租户 | 命名段无认证，同名可被抢先创建并伪造 magic |
 
 一句话：它擅长**「现在这一帧」**，不擅长「所有帧」，更不擅长「一帧都不能少」。
@@ -83,12 +84,12 @@ Python 写、Node/Electron 读（或反过来），两端直接映射同一块 O
 ## 安装
 
 ```bash
-# Python 端（PyPI 已发布）
+# PyPI 目前是 0.1.0，只有 v1
 pip install shmring
 
-# 从源码开发：仓库根
+# 仓库里的 0.2.0（含 v2）。Node 依赖 koffi；npm 包还没发布
 pip install -e .
-npm install        # Node 端依赖 koffi；npm 包发布后可直接 npm install shmring
+npm install
 ```
 
 依赖：Python ≥ 3.9（仅标准库）；Node ≥ 18 + `koffi ^3.3.8`。
@@ -152,9 +153,9 @@ ffmpeg MJPEG → ShmRingWriter.publish(jpeg, meta)
 
 ### 5 路并发：一路一段
 
-[`examples/electron-multi-camera/`](examples/electron-multi-camera/) 是第二档 showcase：一个 Python 进程开 5 个 `ShmRingWriterV2` 各写各的命名段（overwrite，写者不等读者），Electron 用**一个** 2ms 循环遍历 5 个 v2 reader、一次批量 IPC、5 宫格渲染。默认第 1 路尝试真实摄像头，其余四路是合成 PNG；没有摄像头时五路都是合成帧。无头校验 `scripts/verify_multi.py` 不打开摄像头。
+[`examples/electron-multi-camera/`](examples/electron-multi-camera/) 是第二档 showcase：一个 Python 进程开 5 个 `ShmRingWriterV2` 各写各的命名段（overwrite，写者不等读者），另有一段 160 导、512 Hz 的时序。Electron 用**一个** `setTimeout` 循环扫这些 v2 reader。左侧菜单在「视频」和「时序数据」之间切换；读取间隔在界面上改，1–5000 ms，默认 2 ms。`npm start` 给第 1 路加 `--real-camera`，没有设备就退回合成 PNG；`DEMO_REAL_CAMERA=0` 关掉。无头校验 `scripts/verify_multi.py` 不打开摄像头，也不启时序段。
 
-它演示的是「同一进程内多个 writer 实例互不干扰」——帧号、`seq`、槽几何、线程锁全部实例隔离，一路卡住不影响其余四路。配套 [`scripts/bench_multi.py`](scripts/bench_multi.py) 的实测：限速 30fps/路时 5 路合计 **147.2 fps、丢帧 0、帧龄 avg 1.41ms**；不限速纯 publish 达到 133638 fps（5473.8 MB/s），5 路 / 1 路 = 0.76×，说明 CPython 下 GIL 使同进程多线程没有并行加速，但也证明传输层远不是瓶颈。详见 [该目录 README](examples/electron-multi-camera/README.md)。
+它演示的是「同一进程内多个 writer 实例互不干扰」——帧号、`seq`、槽几何、线程锁全部实例隔离，一路卡住不影响其余四路。[`scripts/bench_multi.py`](scripts/bench_multi.py) 仍走 **v1** `ShmRingWriter`。2026-11-24 本机（Windows 10.0.26300，CPython 3.10.11，`shmring 0.2.0`，每帧 40960 B）：目标 30 fps 时实测 1 路 **21.2 fps**、5 路合计 **106.7 fps**，丢帧 0；不限速纯 publish 为 245924 fps（10073 MB/s），5 路 / 1 路 = 0.59×。限速没到 30 是 Windows `sleep` 粒度，不是环的上限。详见 [该目录 README](examples/electron-multi-camera/README.md)。
 
 ## API
 
@@ -186,7 +187,9 @@ ffmpeg MJPEG → ShmRingWriter.publish(jpeg, meta)
 
 ### v2
 
-`ShmRingWriterV2` / `ShmRingReaderV2`（Node 同名）。`publish()` 返回 `{accepted, frame_id}`，默认 `overflow="overwrite"`，写者不等读者。读者默认 `role="observer"`、`join="tip"`（只看新帧）；`join="window"` 从环里还在的最老一帧读起。`read()` 不推进游标，处理完调用 `commit(seq)`；跟不上时 `read_batch()` 给出 `Gap`，用 `skip_to(next_seq)` 接受丢失。`return` 下最多一个 `retainer`，过期心跳不再占环。校验默认 CRC32。
+`ShmRingWriterV2` / `ShmRingReaderV2`（Node 同名）。默认 `overflow="overwrite"`，写者不等读者。读者默认 `role="observer"`、`join="tip"`（只看新帧）；`join="window"` 从环里还在的最老一帧读起。`read()` 不推进游标。跟不上时得到 `Gap`，处理完调用 `commit`，接受丢失则 `skip_to` / `skipTo`。`return` 下最多一个 `retainer`，过期心跳不再占环。校验默认 CRC32，`checksum=false` 关掉。
+
+Python：`publish()` 返回 `PublishResult(accepted, frame_id)`；`FrameV2` 是 `(seq, stamp, payload, meta)`；`read_batch()` 返回 `BatchV2(frames, gap)`；`commit(seq)`、`skip_to(seq)`。Node：`publish()` 返回 `{accepted, frameId}`；帧上 `seq` 与 `frameId` 相同；`readBatch()` 返回 `{frames, gap}`，`gap` 为 `{dropped, nextSeq}` 或 `null`；`commit(seq)`、`skipTo(seq)`。Node v2 接受 `replace: true`；Node v1 没有 `replace`。
 
 五路示例默认用 v2 overwrite。Electron 启动时加 `--real-camera`（`DEMO_REAL_CAMERA=0` 可关）：第 1 路是摄像头 JPEG，没有设备就退回合成 PNG。`scripts/verify_multi.py` 不打开摄像头，五路都断言 PNG。
 
@@ -194,9 +197,9 @@ ffmpeg MJPEG → ShmRingWriter.publish(jpeg, meta)
 
 | 平台 | Python 后端 | Node 后端 | 验证情况 |
 | --- | --- | --- | --- |
-| Windows | `multiprocessing.shared_memory` → `CreateFileMapping` | `OpenFileMappingW` / `CreateFileMappingW` + `MapViewOfFile`（koffi） | **本机实测通过**：双向跨语言对拍、单测全绿 |
-| Linux | 同上 → `shm_open` | `libc.so.6`：`shm_open` / `ftruncate` / `mmap`（koffi） | 由 CI 矩阵覆盖，**本机未实测** |
-| macOS | 同上 → `shm_open` | `libSystem.B.dylib`（含 31 字节段名限制、Darwin `O_CREAT` 常量） | 由 CI 矩阵覆盖，**本机未实测** |
+| Windows | `multiprocessing.shared_memory` → `CreateFileMapping` | `OpenFileMappingW` / `CreateFileMappingW` + `MapViewOfFile`（koffi） | **本机实测**：单测、双向对拍、五路示例 |
+| Linux | 同上 → `shm_open` | `libc.so.6`：`shm_open` / `ftruncate` / `mmap`（koffi） | 工作流包含该平台。最近的 CI（含 `b115675`）失败，**本机未实测** |
+| macOS | 同上 → `shm_open` | `libSystem.B.dylib`（含 31 字节段名限制、Darwin `O_CREAT` 常量） | 同上。v2 的 ARM 机器码还没有单独验收 |
 
 平台差异由库内部消化：POSIX 段名自动加前导 `/`；Python 3.8–3.12 的 `resource_tracker` 误删问题在 attach 时 `unregister`（3.13+ 用 `track=False`）。
 
@@ -204,8 +207,8 @@ ffmpeg MJPEG → ShmRingWriter.publish(jpeg, meta)
 
 ## 限制
 
-1. **单写者**：多个进程同时 `publish()` 会破坏 seqlock，v1 不支持。
-2. **内存序**：依赖 8 字节对齐读写的原子性与写顺序，x86/x64 保证；ARM 等弱内存序平台未验证。
+1. **单写者**：v1 和 v2 都是一段一个写进程。多个进程同时 `publish()` 会破坏 seqlock。
+2. **内存序**：v1 依赖 x86/x64 的写顺序，ARM 未验证。v2 的写是全屏障 exchange，读是 `CAS(ptr, 0, 0)`。Windows 用自映射机器码；POSIX 优先 libatomic 的 `__atomic_exchange_*`，没有符号时用同一套机器码。ARM64 编码已写，尚未在 ARM 上单独验收。
 3. **容量**：`capacity` 用 `uint32` 存储，上限 4 GiB − 1。
 4. **丢帧**：读者落后超过 `slot_count` 帧，旧槽已被覆盖，会跳过并计入 `dropped`（设计取舍）。
 5. **`replace` 语义差异**：POSIX 上是「删名重建」；Windows 无法 `shm_unlink`，改为「重新 attach 并在原位重置」，要求几何参数一致，且调用方须确保没有活跃写者。
@@ -221,7 +224,7 @@ python scripts/bench_multi.py              # 1 路 vs 5 路并发基准
 python scripts/verify_multi.py             # 5 段跨语言端到端验证
 ```
 
-CI 在 `ubuntu-latest` / `macos-latest` / `windows-latest` 三个平台跑完整矩阵，见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)；OIDC 发布通道见 [`.github/workflows/publish.yml`](.github/workflows/publish.yml)。
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) 在 `ubuntu-latest` / `macos-latest` / `windows-latest` 上跑上述步骤。到 `b115675` 为止这些 run 都是失败，不能把「矩阵里有这个平台」当成该平台已通过。OIDC 发布通道见 [`.github/workflows/publish.yml`](.github/workflows/publish.yml)，它只在 `v*` tag 上发 npm。
 
 ## 发布
 
@@ -271,11 +274,11 @@ git push origin master --follow-tags
 ## 路线图
 
 - [x] **v2**：写者不等读者；环满时覆盖，或把该帧立刻交还调用方。Python 与 Node 已实现，见 [V2_DESIGN.md](V2_DESIGN.md)。v1 语义保持「最新优先、可丢」不变
-- [x] 发布 `shmring` 0.2.0 到 PyPI（2026-11-24）；0.1.0 仍在 PyPI（2026-11-22）
+- [ ] 发布 `shmring` 0.2.0 到 PyPI。仓库版本已是 0.2.0；PyPI 上仍是 0.1.0（2026-11-22）
 - [ ] 发布到 npm 0.1.0（首版本机 `npm login`；0.1.1 起走 Trusted Publishing，见「发布」）
-- [ ] Node 端补 `replace` / 重置已有段能力（目前仅 Python 端提供）
-- [ ] ARM / 弱内存序平台的屏障验证
-- [ ] 可选的 CRC32 校验（槽头已预留 `checksum` 字段）
+- [ ] Node **v1** 的 `replace`。Node v2 已支持
+- [ ] ARM / 弱内存序平台的屏障验收（v2 机器码已写，尚未在 ARM 上跑过）
+- [x] v2 的 CRC32，默认开启。v1 槽头仍写 0、读者不校验
 - [ ] Rust / C 参考实现，进一步证明协议语言无关
 
 ## 协议与许可

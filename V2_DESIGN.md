@@ -145,7 +145,7 @@ CRC32 覆盖 `meta_len` 字节的 meta，再接 `length` 字节的 payload（zli
 
 覆盖和 v1 一样会碰到「读者正在拷贝的那一槽」。用**这一槽自己的 seqlock**，不用全局 seqlock：写者动一个槽时，正在拷贝其他槽的读者不受影响。
 
-奇数那次写入必须是全屏障（Windows `InterlockedExchange64`，POSIX `__ATOMIC_SEQ_CST`）。release 存储挡不住后面的 payload 写跑到奇数标记前面，不能用来把槽标成「写入中」。
+奇数那次写入必须是全屏障。实现是 exchange：Windows 为自映射的 `lock xchg`，POSIX 为 `__atomic_exchange_*`（seq_cst），没有该符号时用同一套机器码。release 存储挡不住后面的 payload 写跑到奇数标记前面，不能用来把槽标成「写入中」。
 
 ## 6. 写
 
@@ -256,16 +256,19 @@ Gap(dropped, next_seq)
 Batch(frames, gap | None)
 ```
 
-两端都提供。错误类型在 v1 之上增加 `ChecksumError`。环满且策略为 `return` 时不抛异常，用 `accepted=false` 表示。
+上面是 Python 的名字。Node 用同名类和驼峰参数：`overflow`、`staleMs`、`checksum`、`replace`、`role`、`join`。`publish()` 返回 `{accepted, frameId}`。读出的帧是 `{seq, frameId, stamp, payload, meta}`，`seq` 与 `frameId` 相同。`readBatch()` 返回 `{frames, gap}`，`gap` 为 `{dropped, nextSeq}` 或 `null`。提交是 `commit(seq)`，接受缺口是 `skipTo(seq)`。
 
-原子操作用 FFI，不用 `SharedArrayBuffer`。Python 创建的命名段不是 Node 的 SAB，`Atomics` 碰不到它。
+两端都提供这些类。错误类型在 v1 之上增加 `ChecksumError`。环满且策略为 `return` 时不抛异常，用 `accepted=false` 表示。
 
-| 平台 | 写 `write_pos` / `read_pos` | 槽 seqlock 的奇偶翻转 |
-| --- | --- | --- |
-| Windows | `InterlockedExchange64` | 同左（全屏障） |
-| POSIX | `__atomic_store_n(..., __ATOMIC_RELEASE)` | `__atomic_store_n(..., __ATOMIC_SEQ_CST)` |
+原子操作用 FFI，不用 `SharedArrayBuffer`。Python 创建的命名段不是 Node 的 SAB，`Atomics` 碰不到它。`write_pos` 和 seqlock 的写都是 exchange（全屏障），读是 `CAS(ptr, 0, 0)`，不改内存。
 
-读侧用 acquire load。Node 经 `koffi` 调同一组函数。
+| 平台 | 实现 |
+| --- | --- |
+| Windows | `kernel32` 不导出 `InterlockedExchange64`。两端把 `lock xchg` / `lock cmpxchg` 映射成可执行页再调用 |
+| Linux | 能加载到 `__atomic_exchange_8` / `__atomic_compare_exchange_8` 时用 libatomic 或 libc，memory order 为 seq_cst。否则用 x64 `lock xchg` 或 ARM64 `CASAL` / `SWPAL` |
+| macOS | 先找 `libSystem` 里的同一组符号；没有就用上面的机器码 |
+
+Node 经 `koffi` 调同一组入口。ARM64 机器码已写，尚未在 ARM 上单独跑过。
 
 ## 10. 验收
 
