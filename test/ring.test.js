@@ -103,6 +103,27 @@ test('attaching a missing segment throws a typed error', () => {
   );
 });
 
+test('subscribe delivers the newest frame without moving the batch cursor', async () => {
+  const name = freshName();
+  const w = makeWriter(name);
+  const r = new shm.ShmRingReader(name);
+  const seen = [];
+  const sub = r.subscribe((frame) => seen.push(frame), 5);
+  w.publish(Buffer.from('one'));
+  w.publish(Buffer.from('two'));
+  const deadline = Date.now() + 1000;
+  while (Date.now() < deadline && (seen.length === 0 || seen[seen.length - 1].payload.toString() !== 'two')) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  sub.stop();
+  assert.ok(seen.length > 0);
+  assert.equal(seen[seen.length - 1].frameId, 1);
+  assert.equal(seen[seen.length - 1].payload.toString(), 'two');
+  assert.equal(r.lastFrameId, -1);
+  r.close();
+  w.close();
+});
+
 test('normalizeName adds a POSIX slash and rejects bad names', () => {
   assert.equal(shm.normalizeName('demo', true), '/demo');
   assert.equal(shm.normalizeName('demo', false), 'demo');

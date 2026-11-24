@@ -95,3 +95,27 @@ test('checksum mismatch does not advance', () => {
   r.close();
   w.unlink();
 });
+
+test('subscribe delivers the latest frame and leaves the cursor', async () => {
+  const name = fresh();
+  const w = writer(name);
+  const r = new shm.ShmRingReaderV2(name, { join: 'tip' });
+  const seen = [];
+  const sub = r.subscribe((frame) => seen.push(frame), 5);
+  w.publish(Buffer.from('a'));
+  w.publish(Buffer.from('b'));
+  w.publish(Buffer.from('c'));
+  const deadline = Date.now() + 1000;
+  while (Date.now() < deadline && (seen.length === 0 || seen[seen.length - 1].seq !== 2)) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  sub.stop();
+  assert.ok(seen.length > 0);
+  assert.equal(seen[seen.length - 1].seq, 2);
+  assert.equal(seen[seen.length - 1].frameId, 2);
+  assert.equal(seen[seen.length - 1].payload.toString(), 'c');
+  assert.equal(r.readPos, 0);
+  assert.equal(r.read().seq, 0);
+  r.close();
+  w.unlink();
+});

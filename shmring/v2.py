@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 from . import _protocol_v2 as P
 from ._atomic import View, mono_ns
@@ -273,6 +273,45 @@ class ShmRingWriterV2:
         self.close()
 
 
+class _Subscription:
+    """In-process poll that delivers the newest frame. stop() ends it."""
+
+    def __init__(self, reader, callback: Callable, interval_s: float):
+        self._reader = reader
+        self._callback = callback
+        self._interval_s = interval_s
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="shmring-subscribe", daemon=True)
+        self.error: BaseException | None = None
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _run(self) -> None:
+        last = None
+        while not self._stop.is_set():
+            try:
+                frame = self._reader.latest()
+            except Exception as exc:
+                self.error = exc
+                self._stop.set()
+                return
+            if frame is not None and frame.seq != last:
+                last = frame.seq
+                try:
+                    self._callback(frame)
+                except Exception as exc:
+                    self.error = exc
+                    self._stop.set()
+                    return
+            self._stop.wait(self._interval_s)
+
+    def stop(self) -> None:
+        self._stop.set()
+        if threading.current_thread() is not self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2)
+
+
 class ShmRingReaderV2:
     """Attach to a v2 segment. read() does not advance the shared cursor."""
 
@@ -291,6 +330,7 @@ class ShmRingReaderV2:
             raise
         self._epoch = self._layout["writer_epoch"]
         self._index = -1
+        self._subs: list[_Subscription] = []
         try:
             self._claim(join)
         except Exception:
@@ -418,6 +458,56 @@ class ShmRingReaderV2:
             return gap
         return None
 
+    def latest(self):
+        """Copy the newest published frame. Does not move the cursor."""
+        self._check_open()
+        self.heartbeat()
+        view = self._view
+        L = self._layout
+        for _ in range(self._retries):
+            W = view.load_i64(P.WRITE_POS_OFFSET)
+            if W <= 0:
+                return None
+            seq = W - 1
+            base = P.slot_base(seq % L["slot_count"], L["slot_size"])
+            s1 = view.load_i64(base)
+            if s1 & 1:
+                continue
+            body = P.unpack_slot_body(self._seg.buf, base + 8)
+            if body["slot_seq"] != seq:
+                continue
+            length, meta_len = body["length"], body["meta_len"]
+            if not (0 <= length <= L["payload_capacity"]):
+                continue
+            if not (0 <= meta_len <= L["meta_capacity"]):
+                continue
+            po = L["payload_offset"]
+            buf = self._seg.buf
+            payload = bytes(buf[base + po: base + po + length])
+            meta = bytes(buf[base + P.SLOT_HEADER_SIZE: base + P.SLOT_HEADER_SIZE + meta_len]) if meta_len else b""
+            s2 = view.load_i64(base)
+            if s1 != s2:
+                continue
+            if L["checksum_algo"] == P.CHECKSUM_CRC32 and P.crc32(meta, payload) != body["checksum"]:
+                raise ChecksumError(f"checksum mismatch on frame {seq}")
+            return FrameV2(seq, body["stamp"], payload, meta)
+        return None
+
+    def subscribe(self, callback: Callable, interval_ms: float = 2.0) -> _Subscription:
+        """Call ``callback(frame)`` in this process when a newer frame is published.
+
+        The loop polls every ``interval_ms`` (default 2). Each call receives a
+        copy of the newest frame only. The read cursor is left where it is.
+        ``stop()`` on the returned object ends the loop. ``close()`` stops it too.
+        """
+        if interval_ms < 0:
+            raise ValueError("interval_ms must be >= 0")
+        self._check_open()
+        sub = _Subscription(self, callback, interval_ms / 1000.0)
+        self._subs.append(sub)
+        sub.start()
+        return sub
+
     def read(self):
         self._check_open()
         self.heartbeat()
@@ -459,6 +549,8 @@ class ShmRingReaderV2:
     def close(self) -> None:
         if self._closed:
             return
+        for sub in list(getattr(self, "_subs", ())):
+            sub.stop()
         self._closed = True
         try:
             if self._index >= 0 and self._view is not None:

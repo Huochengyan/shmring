@@ -249,6 +249,8 @@ ShmRingReaderV2(name, role="observer", join="tip")
     skip_to(seq)
     heartbeat()
     writer_alive -> bool
+    latest() -> Frame | None
+    subscribe(callback, interval_ms=2) -> Subscription
     close()
 
 Frame(seq, stamp, payload, meta)
@@ -256,7 +258,9 @@ Gap(dropped, next_seq)
 Batch(frames, gap | None)
 ```
 
-上面是 Python 的名字。Node 用同名类和驼峰参数：`overflow`、`staleMs`、`checksum`、`replace`、`role`、`join`。`publish()` 返回 `{accepted, frameId}`。读出的帧是 `{seq, frameId, stamp, payload, meta}`，`seq` 与 `frameId` 相同。`readBatch()` 返回 `{frames, gap}`，`gap` 为 `{dropped, nextSeq}` 或 `null`。提交是 `commit(seq)`，接受缺口是 `skipTo(seq)`。
+`latest()` 拷贝当前最新一帧，不改 `read_pos`。`subscribe` 在本进程起一个循环，默认每 2 ms 看一次 `write_pos`，序号变了就把这帧的拷贝交给回调。回调返回后循环继续。它不在 `publish()` 里运行，也不把帧送到别的进程。`Subscription.stop()` 结束循环，读者 `close()` 也会停掉它。回调抛错时循环停止，错误留在 `Subscription.error`。
+
+上面是 Python 的名字。Node 用同名类和驼峰参数：`overflow`、`staleMs`、`checksum`、`replace`、`role`、`join`。`publish()` 返回 `{accepted, frameId}`。读出的帧是 `{seq, frameId, stamp, payload, meta}`，`seq` 与 `frameId` 相同。`readBatch()` 返回 `{frames, gap}`，`gap` 为 `{dropped, nextSeq}` 或 `null`。提交是 `commit(seq)`，接受缺口是 `skipTo(seq)`。`latest()` 与 `subscribe(callback, intervalMs)` 同 Python，结束用 `stop()`。
 
 两端都提供这些类。错误类型在 v1 之上增加 `ChecksumError`。环满且策略为 `return` 时不抛异常，用 `accepted=false` 表示。
 

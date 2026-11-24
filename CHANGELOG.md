@@ -5,6 +5,10 @@ The wire format is versioned independently in [PROTOCOL.md](PROTOCOL.md).
 
 ## Unreleased
 
+- Added `subscribe(callback)` on v1 and v2 readers in Python and Node. A
+  process-local loop polls every 2 ms by default and hands the newest frame
+  copy to the callback. It does not move the read cursor or run inside
+  `publish()`.
 - Recorded a Windows run of `scripts/bench_multi.py` (v1, 40960-byte frames,
   2026-11-24): paced case 21.2 fps for 1 lane and 106.7 fps for 5 lanes, 0
   dropped; unlimited publish 245924 fps and 145448 fps (0.59×).

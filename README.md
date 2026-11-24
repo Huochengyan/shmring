@@ -167,6 +167,7 @@ ffmpeg MJPEG → ShmRingWriter.publish(jpeg, meta)
 | | `info`, `payload_capacity`, `meta_capacity` | 布局信息 |
 | | `close()`, `unlink()`, 上下文管理器 | `unlink()` 删除 OS 对象（Windows 为 no-op） |
 | `ShmRingReader(name, retries=8)` | `read() -> Frame \| None` | 最新完整帧；`Frame(frame_id, stamp, payload, meta, seq)` |
+| | `subscribe(callback, interval_ms=2) -> stop()` | 本进程轮询，序号变了就把最新帧的拷贝交给回调 |
 | | `read_batch(since=None) -> Batch` | `Batch(frames, dropped, newest)`；`since=None` 用自身游标 |
 | | `info`, `last_frame_id`, `close()` / `detach()` | |
 | 模块级 | `unlink(name)`, `normalize_name(name, for_posix)` | 清理残留段 / 名字归一化 |
@@ -179,6 +180,7 @@ ffmpeg MJPEG → ShmRingWriter.publish(jpeg, meta)
 | | `info`, `payloadCapacity`, `metaCapacity` | |
 | | `close()`, `unlink()` | |
 | `new ShmRingReader(name, {retries})` | `read() -> {frameId, stamp, payload, meta, seq} \| null` | Buffer 载荷 |
+| | `subscribe(callback, intervalMs=2) -> {stop}` | 本进程轮询，序号变了就把最新帧的拷贝交给回调 |
 | | `readBatch(since?) -> {frames, dropped, newest}` | |
 | | `info`, `lastFrameId`, `close()` / `detach()` | |
 | 模块级 | `unlink(name)`, `normalizeName(name, forPosix)` | |
@@ -189,7 +191,9 @@ ffmpeg MJPEG → ShmRingWriter.publish(jpeg, meta)
 
 `ShmRingWriterV2` / `ShmRingReaderV2`（Node 同名）。默认 `overflow="overwrite"`，写者不等读者。读者默认 `role="observer"`、`join="tip"`（只看新帧）；`join="window"` 从环里还在的最老一帧读起。`read()` 不推进游标。跟不上时得到 `Gap`，处理完调用 `commit`，接受丢失则 `skip_to` / `skipTo`。`return` 下最多一个 `retainer`，过期心跳不再占环。校验默认 CRC32，`checksum=false` 关掉。
 
-Python：`publish()` 返回 `PublishResult(accepted, frame_id)`；`FrameV2` 是 `(seq, stamp, payload, meta)`；`read_batch()` 返回 `BatchV2(frames, gap)`；`commit(seq)`、`skip_to(seq)`。Node：`publish()` 返回 `{accepted, frameId}`；帧上 `seq` 与 `frameId` 相同；`readBatch()` 返回 `{frames, gap}`，`gap` 为 `{dropped, nextSeq}` 或 `null`；`commit(seq)`、`skipTo(seq)`。Node v2 接受 `replace: true`；Node v1 没有 `replace`。
+Python：`publish()` 返回 `PublishResult(accepted, frame_id)`；`FrameV2` 是 `(seq, stamp, payload, meta)`；`read_batch()` 返回 `BatchV2(frames, gap)`；`commit(seq)`、`skip_to(seq)`。`latest()` 只拷最新一帧，不推进游标。`subscribe(callback, interval_ms=2)` 在本进程里按这个间隔看 `write_pos`，序号变了就把最新帧的拷贝交给回调；返回对象的 `stop()` 结束循环，`close()` 也会停掉它。Node：`publish()` 返回 `{accepted, frameId}`；帧上 `seq` 与 `frameId` 相同；`readBatch()` 返回 `{frames, gap}`，`gap` 为 `{dropped, nextSeq}` 或 `null`；`commit(seq)`、`skipTo(seq)`；`latest()` 与 `subscribe(callback, intervalMs)` 同上，结束用 `stop()`。Node v2 接受 `replace: true`；Node v1 没有 `replace`。
+
+订阅不出本进程。它只送当前最新一帧，中间被盖掉的序号不会逐个补上。`publish()` 里不会调用这个回调。
 
 五路示例默认用 v2 overwrite。Electron 启动时加 `--real-camera`（`DEMO_REAL_CAMERA=0` 可关）：第 1 路是摄像头 JPEG，没有设备就退回合成 PNG。`scripts/verify_multi.py` 不打开摄像头，五路都断言 PNG。
 

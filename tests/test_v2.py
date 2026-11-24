@@ -173,6 +173,28 @@ class V2Tests(unittest.TestCase):
         with self.assertRaises(ProtocolError):
             ShmRingReader(name)
 
+    def test_subscribe_delivers_latest_without_moving_cursor(self):
+        name = self.name()
+        w = self.writer(name)
+        r = self.reader(name, join="tip")
+        seen = []
+        sub = r.subscribe(seen.append, interval_ms=5)
+        for i in range(3):
+            w.publish(bytes([i]))
+        deadline = time.time() + 1
+        while time.time() < deadline and (not seen or seen[-1].seq != 2):
+            time.sleep(0.01)
+        sub.stop()
+        self.assertTrue(seen)
+        self.assertEqual(seen[-1].seq, 2)
+        self.assertEqual(seen[-1].payload, bytes([2]))
+        self.assertEqual([frame.seq for frame in seen], sorted(frame.seq for frame in seen))
+        self.assertEqual(r.read_pos, 0)
+        self.assertEqual(r.read().seq, 0)
+        w.publish(b"after")
+        time.sleep(0.05)
+        self.assertEqual(seen[-1].seq, 2)
+
     def test_overwrite_ignores_retainer(self):
         name = self.name()
         w = self.writer(name, slot_count=2, overflow="overwrite")

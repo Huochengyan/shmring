@@ -132,6 +132,23 @@ class RingTests(unittest.TestCase):
         self.cleanup.append(r)
         self.assertEqual(r.read().payload, b"new")
 
+    def test_subscribe_delivers_newest_frame(self):
+        w = self.writer()
+        r = ShmRingReader(self.name)
+        self.cleanup.append(r)
+        seen = []
+        sub = r.subscribe(seen.append, interval_ms=5)
+        w.publish(b"one")
+        w.publish(b"two")
+        deadline = time.time() + 1
+        while time.time() < deadline and (not seen or seen[-1].payload != b"two"):
+            time.sleep(0.01)
+        sub.stop()
+        self.assertTrue(seen)
+        self.assertEqual(seen[-1].frame_id, 1)
+        self.assertEqual(seen[-1].payload, b"two")
+        self.assertEqual(r.last_frame_id, -1)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
